@@ -85,6 +85,12 @@ python3 -m unittest discover -s tests
 
 [DESIGN.md](DESIGN.md) explains how the pieces fit together.
 
+## Support BUNKR
+
+BUNKR is free and stays free. If it helps your family and you'd like to say thanks, you can sponsor it on
+[GitHub Sponsors](https://github.com/sponsors/MrPatzy) or [buy me a coffee](https://buymeacoffee.com/zachpatzm).
+Bug reports and pull requests help just as much.
+
 ## Disclaimer
 
 BUNKR is a personal tool shared as-is. It is not an official alert service, not medical advice, and no
