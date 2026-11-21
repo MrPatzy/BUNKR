@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BUNKR login</title>
+<link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48">
+<link rel="icon" type="image/png" sizes="192x192" href="/icons/icon-192.png">
+<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+<link rel="manifest" href="/manifest.webmanifest" crossorigin="use-credentials">
+<meta name="theme-color" content="#0a0c10">
+<meta name="apple-mobile-web-app-title" content="BUNKR">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="login-page">
+<main class="login-box">
+  <h1 class="login-logo"><img src="/logo.jpg" alt="BUNKR, home preparedness database" width="610" height="560"></h1>
+  <p class="muted">Family preparedness hub. Log in to continue.</p>
+  <form id="login-form" class="card">
+    <label>Username<input name="username" autocomplete="username webauthn" autocapitalize="none" required autofocus></label>
+    <label>Password<input name="password" type="password" autocomplete="current-password" required></label>
+    <p id="login-error" class="bad" hidden></p>
+    <button type="submit" class="primary">Log in</button>
+    <button type="button" id="passkey-login" hidden>Log in with a passkey</button>
+  </form>
+
+  <form id="step-form" class="card" hidden>
+    <h2>Second step</h2>
+    <button type="button" id="step-passkey" class="primary" hidden>Use my passkey</button>
+    <div id="step-code" hidden>
+      <label><span id="step-code-label">Code from your authenticator app</span>
+        <input name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="12" autocapitalize="characters"></label>
+      <button type="submit" class="primary">Continue</button>
+    </div>
+    <button type="button" class="link" id="step-recovery" hidden>Lost your phone? Use a recovery code</button>
+    <p id="step-error" class="bad" hidden></p>
+  </form>
+
+  <div id="setup-box" class="card" hidden>
+    <h2>Set up two-step login</h2>
+    <p class="muted">This BUNKR asks for a second step when you log in, so a stolen password isn't enough.</p>
+    <button type="button" id="setup-passkey" class="primary" hidden>Use Face ID or fingerprint (passkey)</button>
+    <button type="button" id="setup-totp">Use an authenticator app</button>
+    <div id="setup-totp-box" hidden>
+      <p class="muted">In your authenticator app (Google Authenticator, Microsoft Authenticator, 1Password, iPhone Passwords) add an
+        account with this key, or <a id="setup-link">tap here on this phone</a>:</p>
+      <p class="totp-key" id="setup-key"></p>
+      <form id="setup-confirm"><label>Then type the 6-digit code it shows<input name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="6"></label>
+        <button type="submit" class="primary">Turn on</button></form>
+    </div>
+    <div id="setup-codes" hidden>
+      <p><strong>Recovery codes.</strong> Each one works once if you lose your phone. Write them down or print this page and keep it with
+        your documents. They won't be shown again.</p>
+      <ul class="recovery-codes" id="setup-code-list"></ul>
+      <button type="button" class="primary" id="setup-done">I've saved them, continue</button>
+    </div>
+    <p id="setup-error" class="bad" hidden></p>
+    <button type="button" class="link" id="setup-logout">Log out</button>
+  </div>
+</main>
+<script src="passkey.js"></script>
+<script src="login.js"></script>
+</body>
+</html>

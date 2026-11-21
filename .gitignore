@@ -1,0 +1,18 @@
+# Data and secrets never go in the repo
+*.db
+*.db-*
+*.sqlite*
+*.env
+.env*
+secrets/
+*.key
+*.pem
+# Downloads, builds, caches
+downloads/
+*.zim
+*.7z
+*.7z.[0-9][0-9][0-9]
+__pycache__/
+*.pyc
+.cache/
+pr-body.md

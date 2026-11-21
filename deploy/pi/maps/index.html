@@ -1,0 +1,328 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BUNKR Maps</title>
+<!--
+  Offline map viewer for BUNKR. Everything it needs is in this folder:
+    maplibre-gl.js / maplibre-gl.css   MapLibre GL JS (pinned in deploy/install.sh)
+    pmtiles.js                         PMTiles reader (pinned in deploy/install.sh)
+  Map files: every *.pmtiles listed by GET /store/maps/ (JSON list or an HTML index with links).
+  With ?overlay=situation it also draws BUNKR's places and Situation items (GET /api/situation/geo), refreshed
+  every few minutes; that is how the Situation tab shows its map.
+  The server must answer HTTP Range requests for .pmtiles files.
+
+  No internet is used: there are no remote fonts, glyphs or sprites. Because text labels in MapLibre
+  need glyph files, this viewer draws no text labels. Tap a feature to see its name instead.
+-->
+<link rel="stylesheet" href="maplibre-gl.css">
+<style>
+  :root { --bg: #f4f1ea; --fg: #1d1d1b; --bar: #ffffff; --line: #d6d1c4; --accent: #9a3b1b; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #1b1c1e; --fg: #e9e6df; --bar: #26282b; --line: #3a3d42; --accent: #e08a5e; }
+  }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg);
+    font: 15px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  body { display: flex; flex-direction: column; }
+  header { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 8px 12px;
+    background: var(--bar); border-bottom: 1px solid var(--line); }
+  header strong { margin-right: 4px; }
+  select { font: inherit; padding: 6px 8px; max-width: 100%; flex: 1 1 200px;
+    background: var(--bg); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; }
+  #info { font-size: 13px; opacity: .8; flex: 1 1 100%; }
+  #map { flex: 1; min-height: 0; }
+  #msg { position: absolute; inset: 40% 16px auto; text-align: center; padding: 16px;
+    background: var(--bar); border: 1px solid var(--line); border-radius: 8px; display: none; }
+  .maplibregl-popup-content { color: #1d1d1b; font-size: 14px; max-width: 260px; }
+  .maplibregl-popup-content small { color: #666; }
+  .maplibregl-popup-content button { font: inherit; margin-top: 6px; padding: 4px 8px; }
+  body.overlay header { padding: 4px 8px; }
+  body.overlay header strong, body.overlay #info { display: none; }
+  #legend { position: absolute; left: 8px; bottom: 28px; background: var(--bar); border: 1px solid var(--line);
+    border-radius: 8px; padding: 6px 8px; font-size: 12px; display: none; }
+  #legend span { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin: 0 4px 0 8px; vertical-align: -1px; }
+  #legend span:first-child { margin-left: 0; }
+</style>
+</head>
+<body>
+<header>
+  <strong>BUNKR Maps</strong>
+  <select id="pick" aria-label="Map file"><option>Loading map list…</option></select>
+  <div id="info"></div>
+</header>
+<div id="map"></div>
+<div id="msg"></div>
+<div id="legend"><span style="background:#c62828"></span>Act now<span style="background:#ef6c00"></span>Soon / near you<span
+  style="background:#6d7a86"></span>Good to know<span style="background:#1d1d1b;border-radius:2px"></span>Our places</div>
+<script src="maplibre-gl.js"></script>
+<script src="pmtiles.js"></script>
+<script>
+"use strict";
+const LIST_URL = "/store/maps/";
+const pick = document.getElementById("pick");
+const info = document.getElementById("info");
+const msg = document.getElementById("msg");
+
+const protocol = new pmtiles.Protocol();
+maplibregl.addProtocol("pmtiles", protocol.tile);
+
+const map = new maplibregl.Map({
+  container: "map",
+  style: { version: 8, sources: {}, layers: [{ id: "bg", type: "background", paint: { "background-color": "#e8e4da" } }] },
+  center: [-105.5, 39.0],   // Colorado, until a map is chosen
+  zoom: 5,
+  attributionControl: false,
+});
+map.addControl(new maplibregl.NavigationControl(), "top-right");
+map.addControl(new maplibregl.ScaleControl({ unit: "imperial" }), "bottom-left");
+map.addControl(new maplibregl.GeolocateControl({ trackUserLocation: true }), "top-right");
+
+function show(text) { msg.textContent = text; msg.style.display = text ? "block" : "none"; }
+function esc(s) { return String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
+function size(n) { return n > 1e9 ? (n / 1e9).toFixed(1) + " GB" : n > 1e6 ? (n / 1e6).toFixed(0) + " MB" : n ? (n / 1e3).toFixed(0) + " kB" : ""; }
+
+// Accepts a JSON list (["a.pmtiles"], [{"name": "a.pmtiles", "size": 1}], or {"files": [...]})
+// or an HTML directory index with links.
+async function listMaps() {
+  const r = await fetch(LIST_URL, { headers: { Accept: "application/json, text/html;q=0.5" } });
+  if (!r.ok) throw new Error("the map list returned HTTP " + r.status);
+  const text = await r.text();
+  let items = [];
+  try {
+    let data = JSON.parse(text);
+    if (data && !Array.isArray(data)) data = data.files || data.items || [];
+    items = data.map(d => typeof d === "string" ? { name: d } : { name: d.name || d.path, size: d.size });
+  } catch (e) {
+    const doc = new DOMParser().parseFromString(text, "text/html");
+    items = [...doc.querySelectorAll("a[href]")].map(a => ({ name: decodeURIComponent(a.getAttribute("href").split("?")[0]) }));
+  }
+  const seen = new Set();
+  return items
+    .filter(i => i.name && /\.pmtiles$/i.test(i.name))
+    .map(i => ({ ...i, name: i.name.replace(/^.*\//, "") }))
+    .filter(i => !seen.has(i.name) && seen.add(i.name))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+// Colours by common layer names (Protomaps and OpenMapTiles schemas); anything else gets grey.
+const COLOURS = [
+  [/water|ocean|lake|river|waterway/, "#9cc3e0"],
+  [/park|wood|forest|grass|landcover|natural|green/, "#c8dcb4"],
+  [/building/, "#d4cbbd"],
+  [/road|transport|street|highway|path/, "#ffffff"],
+  [/rail|transit/, "#8f8f8f"],
+  [/boundar|admin/, "#9a6ea3"],
+  [/place|poi|peak|mountain/, "#9a3b1b"],
+  [/earth|land/, "#efebe2"],
+];
+function colourFor(id) {
+  const k = id.toLowerCase();
+  for (const [re, c] of COLOURS) if (re.test(k)) return c;
+  return "#b8b2a5";
+}
+function rank(id) {   // draw land first, then water, then the rest
+  const k = id.toLowerCase();
+  if (/earth|^land$|landcover|landuse|natural|park/.test(k)) return 0;
+  if (/water|ocean/.test(k)) return 1;
+  if (/building/.test(k)) return 2;
+  return 3;
+}
+
+const POLY = ["in", ["geometry-type"], ["literal", ["Polygon", "MultiPolygon"]]];
+const LINE = ["in", ["geometry-type"], ["literal", ["LineString", "MultiLineString"]]];
+const POINT = ["in", ["geometry-type"], ["literal", ["Point", "MultiPoint"]]];
+
+// Label fonts (Noto Sans glyph ranges) are installed next to this page by deploy/install.sh.
+// Without them the map still works, just with no text.
+const FONT_BASE = new URL("fonts/", location.href).href;
+let fontsOk = null;
+async function haveFonts() {
+  if (fontsOk === null) {
+    try { fontsOk = (await fetch(FONT_BASE + "Noto%20Sans%20Regular/0-255.pbf")).ok; }
+    catch (e) { fontsOk = false; }
+  }
+  return fontsOk;
+}
+
+function labelLayers(ids) {
+  const out = [];
+  const halo = { "text-color": "#3b3a36", "text-halo-color": "#ffffff", "text-halo-width": 1.4 };
+  for (const id of ids) {
+    if (/road|street|highway|transport/i.test(id)) {
+      out.push({ id: id + "-label", type: "symbol", source: "m", "source-layer": id, filter: LINE, minzoom: 12,
+        layout: { "symbol-placement": "line", "text-field": ["coalesce", ["get", "name"], ["get", "ref"], ""],
+          "text-font": ["Noto Sans Regular"], "text-size": ["interpolate", ["linear"], ["zoom"], 12, 10, 16, 13] },
+        paint: halo });
+    } else if (/place/i.test(id)) {
+      out.push({ id: id + "-label", type: "symbol", source: "m", "source-layer": id, filter: POINT,
+        layout: { "text-field": ["coalesce", ["get", "name:en"], ["get", "name"], ""], "text-font": ["Noto Sans Medium"],
+          "text-size": ["match", ["get", "kind"], "country", 15, "region", 14, "locality", 13, 11],
+          "text-anchor": "top", "text-offset": [0, 0.5], "text-max-width": 8 },
+        paint: halo });
+    } else if (/poi/i.test(id)) {
+      out.push({ id: id + "-label", type: "symbol", source: "m", "source-layer": id, filter: POINT, minzoom: 15,
+        layout: { "text-field": ["coalesce", ["get", "name"], ""], "text-font": ["Noto Sans Regular"], "text-size": 10.5,
+          "text-anchor": "top", "text-offset": [0, 0.6], "text-max-width": 7 },
+        paint: { ...halo, "text-color": "#6b5a48" } });
+    } else if (/water/i.test(id)) {
+      out.push({ id: id + "-label", type: "symbol", source: "m", "source-layer": id, filter: POINT, minzoom: 10,
+        layout: { "text-field": ["coalesce", ["get", "name"], ""], "text-font": ["Noto Sans Regular"], "text-size": 11 },
+        paint: { ...halo, "text-color": "#2f5f86" } });
+    }
+  }
+  return out;
+}
+
+function vectorStyle(src, vectorLayers, withLabels) {
+  const ids = vectorLayers.map(l => l.id).sort((a, b) => rank(a) - rank(b));
+  const layers = [{ id: "bg", type: "background", paint: { "background-color": "#e8e4da" } }];
+  for (const id of ids) layers.push({ id: id + "-fill", type: "fill", source: "m", "source-layer": id, filter: POLY,
+    paint: { "fill-color": colourFor(id), "fill-opacity": /building/i.test(id) ? 0.8 : 1 } });
+  for (const id of ids) {
+    const road = /road|transport|street|highway/i.test(id);
+    if (road) layers.push({ id: id + "-casing", type: "line", source: "m", "source-layer": id, filter: LINE,
+      paint: { "line-color": "#b9b2a4", "line-width": ["interpolate", ["exponential", 1.6], ["zoom"], 5, 0.8, 16, 12] } });
+    layers.push({ id: id + "-line", type: "line", source: "m", "source-layer": id, filter: LINE,
+      paint: { "line-color": colourFor(id),
+        "line-width": road ? ["interpolate", ["exponential", 1.6], ["zoom"], 5, 0.4, 16, 9] : 1,
+        "line-dasharray": /boundar|admin/i.test(id) ? [3, 2] : [1, 0] } });
+  }
+  for (const id of ids) layers.push({ id: id + "-point", type: "circle", source: "m", "source-layer": id, filter: POINT,
+    minzoom: /place/i.test(id) ? 0 : 13,
+    paint: { "circle-color": colourFor(id), "circle-radius": /place/i.test(id) ? 3.5 : 2.5,
+      "circle-stroke-color": "#ffffff", "circle-stroke-width": 1 } });
+  if (withLabels) {
+    layers.push(...labelLayers(ids));
+    return { version: 8, glyphs: FONT_BASE + "{fontstack}/{range}.pbf", sources: { m: src }, layers };
+  }
+  return { version: 8, sources: { m: src }, layers };
+}
+
+async function openMap(name) {
+  show("Opening " + name + "…");
+  const url = new URL(LIST_URL + encodeURIComponent(name), location.href).href;
+  const p = new pmtiles.PMTiles(url);
+  protocol.add(p);
+  const h = await p.getHeader();
+  let meta = {};
+  try { meta = (await p.getMetadata()) || {}; } catch (e) { /* metadata is optional */ }
+  const src = { type: "vector", url: "pmtiles://" + url, attribution: meta.attribution || "" };
+  let style;
+  if (h.tileType === pmtiles.TileType.Mvt) {
+    const vl = meta.vector_layers || (meta.json && JSON.parse(meta.json).vector_layers) || [];
+    if (!vl.length) throw new Error("this vector map does not list its layers, so it cannot be styled");
+    style = vectorStyle(src, vl, await haveFonts());
+  } else if ([pmtiles.TileType.Png, pmtiles.TileType.Jpeg, pmtiles.TileType.Webp, pmtiles.TileType.Avif].includes(h.tileType)) {
+    style = { version: 8, sources: { m: { ...src, type: "raster", tileSize: 256 } },
+      layers: [{ id: "bg", type: "background", paint: { "background-color": "#e8e4da" } }, { id: "raster", type: "raster", source: "m" }] };
+  } else {
+    throw new Error("unknown tile type " + h.tileType);
+  }
+  map.setStyle(style);
+  map.setMaxZoom(Math.max(h.maxZoom + 3, 6));
+  if (OVERLAY && fitted) {
+    /* keep the view on our places */
+  } else if (h.minLon < h.maxLon && h.minLat < h.maxLat && (h.maxLon - h.minLon) < 359) {
+    map.fitBounds([[h.minLon, h.minLat], [h.maxLon, h.maxLat]], { padding: 20, animate: false });
+  } else {
+    map.jumpTo({ center: [h.centerLon, h.centerLat], zoom: h.centerZoom });
+  }
+  const kind = h.tileType === pmtiles.TileType.Mvt ? "vector" : "picture tiles";
+  info.textContent = [meta.name || name, kind, "zoom " + h.minZoom + "–" + h.maxZoom, meta.attribution ? meta.attribution.replace(/<[^>]*>/g, "").replace(/&copy;/g, "©") : ""].filter(Boolean).join(" · ");
+  show("");
+}
+
+// ---------- Situation overlay ----------
+const OVERLAY = new URLSearchParams(location.search).get("overlay") === "situation";
+const TIER_COLOUR = ["match", ["get", "tier"], "flash", "#c62828", "priority", "#ef6c00", "#6d7a86"];
+let overlayData = { type: "FeatureCollection", features: [] }, fitted = false;
+function addOverlay() {
+  if (!OVERLAY || map.getSource("sit")) return;
+  map.addSource("sit", { type: "geojson", data: overlayData });
+  const poly = ["in", ["geometry-type"], ["literal", ["Polygon", "MultiPolygon"]]];
+  map.addLayer({ id: "sit-area", type: "fill", source: "sit", filter: poly, paint: { "fill-color": TIER_COLOUR, "fill-opacity": 0.18 } });
+  map.addLayer({ id: "sit-edge", type: "line", source: "sit", filter: poly, paint: { "line-color": TIER_COLOUR, "line-width": 2 } });
+  map.addLayer({ id: "sit-point", type: "circle", source: "sit", filter: ["all", POINT, ["==", ["get", "kind"], "item"]],
+    paint: { "circle-color": TIER_COLOUR, "circle-radius": ["match", ["get", "tier"], "flash", 9, "priority", 7, 5],
+      "circle-stroke-color": "#ffffff", "circle-stroke-width": 1.5 } });
+  map.addLayer({ id: "sit-site", type: "circle", source: "sit", filter: ["==", ["get", "kind"], "site"],
+    paint: { "circle-color": "#1d1d1b", "circle-radius": 7, "circle-stroke-color": "#ffffff", "circle-stroke-width": 2.5 } });
+}
+async function loadOverlay() {
+  try {
+    const r = await fetch("/api/situation/geo", { headers: { "X-Bunkr": "1" } });
+    if (!r.ok) return;
+    overlayData = await r.json();
+    map.getSource("sit")?.setData(overlayData);
+    if (!fitted) {
+      const pts = overlayData.features.filter(f => f.properties.kind === "site").map(f => f.geometry.coordinates);
+      if (pts.length) {
+        fitted = true;
+        const b = pts.reduce((bb, c) => bb.extend(c), new maplibregl.LngLatBounds(pts[0], pts[0]));
+        map.fitBounds(b, { padding: 60, maxZoom: 9, animate: false });
+      }
+    }
+  } catch (e) { /* offline: keep what we have */ }
+}
+if (OVERLAY) {
+  document.body.classList.add("overlay");
+  document.getElementById("legend").style.display = "block";
+  map.on("style.load", () => { addOverlay(); loadOverlay(); });  // a new map file resets the style
+  setInterval(loadOverlay, 5 * 60 * 1000);
+}
+function overlayPopup(f, at) {
+  const p = f.properties || {};
+  const where = p.kind === "site" ? "Our place" : [p.km === 0 || p.km === "0" ? "at " + p.site : p.km != null && p.km !== "null" ? p.km + " km from " + p.site : "", p.trust].filter(Boolean).join(" · ");
+  const pop = new maplibregl.Popup({ closeButton: true }).setLngLat(at);
+  const el = document.createElement("div");
+  el.innerHTML = "<b>" + esc(p.title) + "</b>" + (where ? "<br><small>" + esc(where) + "</small>" : "") +
+    (p.summary ? "<br><small>" + esc(p.summary) + "</small>" : "");
+  if (p.scenario && window.parent !== window) {
+    const b = document.createElement("button");
+    b.textContent = "Open the checklist";
+    b.onclick = () => window.parent.postMessage({ bunkr: "scenario", id: p.scenario }, location.origin);
+    el.append(document.createElement("br"), b);
+  }
+  if (p.url) { const a = document.createElement("a"); a.href = p.url; a.target = "_blank"; a.rel = "noopener"; a.textContent = " Source"; el.append(" ", a); }
+  pop.setDOMContent(el).addTo(map);
+}
+
+// Tap a feature: show its name and type in a popup (stands in for the text labels we cannot draw).
+map.on("click", e => {
+  if (OVERLAY) {
+    const o = map.queryRenderedFeatures(e.point, { layers: ["sit-site", "sit-point", "sit-area"].filter(id => map.getLayer(id)) })[0];
+    if (o) return overlayPopup(o, e.lngLat);
+  }
+  const f = map.queryRenderedFeatures(e.point).find(f => f.layer.id !== "bg" && f.layer.type !== "raster");
+  if (!f) return;
+  const p = f.properties || {};
+  const name = p.name || p["name:en"] || p.ref || p.kind || p.class || f.sourceLayer;
+  const kind = [p.kind || p.class, p.kind_detail || p.subclass].filter(Boolean).join(", ");
+  new maplibregl.Popup({ closeButton: true }).setLngLat(e.lngLat)
+    .setHTML("<b>" + esc(name) + "</b>" + (kind ? "<br><small>" + esc(kind) + " · " + esc(f.sourceLayer || "") + "</small>" : ""))
+    .addTo(map);
+});
+
+(async () => {
+  try {
+    const maps = await listMaps();
+    if (!maps.length) {
+      pick.innerHTML = "<option>No maps yet</option>";
+      show("No .pmtiles map files yet. Copy one into /var/lib/bunkr/store/maps (or let the hub sync it), then reload.");
+      return;
+    }
+    pick.innerHTML = maps.map(m => '<option value="' + esc(m.name) + '">' + esc(m.name) + (m.size ? " (" + size(m.size) + ")" : "") + "</option>").join("");
+    const wanted = decodeURIComponent(location.hash.slice(1));
+    if (maps.some(m => m.name === wanted)) pick.value = wanted;
+    const go = () => { location.hash = encodeURIComponent(pick.value); openMap(pick.value).catch(err => show("Could not open the map: " + err.message)); };
+    pick.addEventListener("change", go);
+    go();
+  } catch (err) {
+    pick.innerHTML = "<option>Map list unavailable</option>";
+    show("Could not load the map list: " + err.message);
+  }
+})();
+</script>
+</body>
+</html>

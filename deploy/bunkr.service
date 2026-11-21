@@ -1,0 +1,19 @@
+[Unit]
+Description=Project BUNKR preparedness hub
+After=network-online.target bunkr-firewall.service
+Requires=bunkr-firewall.service
+
+[Service]
+User=bunkr
+Group=bunkr
+WorkingDirectory=/opt/bunkr
+Environment=HOME=/var/lib/bunkr
+ExecStart=/usr/bin/python3 -m bunkr --db /var/lib/bunkr/bunkr.db --bind 0.0.0.0 --port 8765 --no-browser --require-login --role hub --allow-host bunkr.example.org --allow-host 192.168.1.40
+Restart=on-failure
+NoNewPrivileges=yes
+ProtectSystem=full
+PrivateTmp=yes
+ReadWritePaths=/var/lib/bunkr
+
+[Install]
+WantedBy=multi-user.target
