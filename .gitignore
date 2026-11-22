@@ -16,3 +16,4 @@ __pycache__/
 *.pyc
 .cache/
 pr-body.md
+.claude/

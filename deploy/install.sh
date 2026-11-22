@@ -404,6 +404,21 @@ if [[ $ROLE == pi ]]; then
 fi
 apt_install "${BASE_PKGS[@]}"
 
+# Optional programs BUNKR can use: Tesseract reads nutrition labels. With no internet they come from the store
+# (the hub keeps them in store/packages/<system>/, see bunkr/packages.py), when a copy for this system is there.
+SYSID="$(. /etc/os-release && echo "${ID:-}-${VERSION_CODENAME:-}")-$(dpkg --print-architecture)"
+LOCAL_PKGS="$STORE/packages/$SYSID"
+if [[ -f $LOCAL_PKGS/Packages ]]; then
+	info "Using the store's packages for $SYSID as a package source ($LOCAL_PKGS)."
+	put_file /etc/apt/sources.list.d/bunkr-store.list 0644 root:root <<<"deb [trusted=yes] file:$LOCAL_PKGS ./"
+	run apt-get update -o Dir::Etc::sourcelist=sources.list.d/bunkr-store.list -o Dir::Etc::sourceparts=- -o APT::Get::List-Cleanup=0 || true
+fi
+OPT_PKGS=()
+for p in tesseract-ocr tesseract-ocr-eng; do
+	if pkg_available "$p"; then OPT_PKGS+=("$p"); else skipped "$p" "no package for this system (label reading stays off)"; fi
+done
+((${#OPT_PKGS[@]})) && apt_install "${OPT_PKGS[@]}"
+
 if command -v python3 >/dev/null 2>&1 && ! python3 -c 'import sys; sys.exit(sys.version_info < (3, 12))'; then
 	warn "BUNKR is developed on Python 3.12; this system has $(python3 -V 2>&1). It may work, but test it."
 fi

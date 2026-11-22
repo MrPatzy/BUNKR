@@ -99,14 +99,15 @@ function showTab(name) {
   if (name === "kit") { loadDrives(); if (!libraries) loadLibraries(); }
   if (name === "documents") loadDocSizes();
   if (name === "nodes") { loadNodes(); loadConflicts(); }
-  if (name === "household") { loadUsers(); loadAudit(); loadTwoStep(); loadFlightSettings(); loadMail(); loadHA(); loadVersion(); }
+  if (name === "household") { loadUsers(); loadAudit(); loadTwoStep(); loadFlightSettings(); loadMail(); loadHA(); loadNaming(); loadFoodSources(); loadKroger(); loadAI(); loadVersion(); }
   if (name === "situation") loadSituation();
   if (name === "brief") loadNewsTab();
   if (name === "home") { refloat(); if (!PUSH) loadPush(); }
-  if (name === "comms") loadRadio();
+  if (name === "comms") { loadComms(); loadRadio(); }
   if (name === "family") { loadFamily(); loadMesh(); }
   if (name === "medical") loadMedical();
   if (name === "power") loadPower();
+  if (name === "recovery") loadRecovery();
   if (name === "scenarios") renderScenarios();
   if (name === "sites" && isAdmin()) { loadMaps(); loadLocalWatch(); }
   if (name === "downloads") loadDepot();
@@ -655,6 +656,214 @@ $("#flights-key-form").addEventListener("submit", (e) => {
 });
 $("#flights-key-remove").addEventListener("click", () => confirm("Remove the FlightAware key?") &&
   guarded(async () => { await api("POST", "flights/settings", { key: "" }); loadFlightSettings(); }));
+/* ---------- optional AI (admin, Household tab) ---------- */
+async function loadAI() {
+  const card = $("#ai-card");
+  card.hidden = !isAdmin() || ["pi", "laptop"].includes(S.node_role);
+  if (card.hidden) return;
+  const r = await api("GET", "ai").catch(() => null);
+  if (!r) return;
+  const f = $("#ai-form");
+  if (f.contains(document.activeElement)) return;
+  f.provider.replaceChildren(...Object.entries(r.providers).map(([v, t]) => h("option", { value: v }, t)));
+  for (const k of ["summaries", "connector"]) f[k].checked = r[k];
+  for (const k of ["provider", "ollama_url", "model"]) f[k].value = r[k];
+  aiShow(r);
+}
+let aiLast = null;
+function aiShow(r) {
+  if (r) aiLast = r;
+  r = aiLast;
+  const f = $("#ai-form"), ollama = f.provider.value === "ollama";
+  $$(".ai-ollama", f).forEach((x) => { x.hidden = !ollama; });
+  const cli = !r ? "" : r.cli_found ? `The hub has the AI command (${r.cli})` + (r.cli_login ? " and a login file." : " but no login file (ai.env).")
+    : `The AI command (${r.cli}) isn't installed on the hub.`;
+  const st = r && r.status && r.status.error ? ` Last try: ${r.status.error}` : "";
+  $("#ai-note").textContent = (ollama ? "Ollama runs a free model on your own computer; nothing leaves your network." : cli) + st;
+}
+$("#ai-form").provider.addEventListener("change", () => aiShow(null));
+$("#ai-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const f = e.target;
+  guarded(async () => {
+    const r = await api("POST", "ai", { summaries: f.summaries.checked, connector: f.connector.checked, provider: f.provider.value,
+      ollama_url: f.ollama_url.value, model: f.model.value });
+    aiShow(r); toast("Saved");
+  });
+});
+$("#ai-test").addEventListener("click", () => guarded(async () => {
+  const r = await api("POST", "ai/test");
+  toast(`AI answered: ${r.reply}`);
+}));
+/* ---------- names for scanned items (admin, Household tab) ---------- */
+const naming = { pieces: [], pick: -1, default: "", fields: [], help: {}, timer: 0 };
+const PUNCT_NAMES = { ", ": "comma", " ": "space", " - ": "dash", " / ": "slash", " | ": "bar", ": ": "colon", "; ": "semicolon", ".": "dot" };
+const namingSplit = (t) => (t || "").split(/(\{\w+\}|[\[\]()])/).filter(Boolean);
+function namingDraw() {
+  const box = $("#naming-pieces");
+  box.replaceChildren(...naming.pieces.map((p, i) => {
+    const f = /^\{(\w+)\}$/.exec(p);
+    const b = h("button", { type: "button", class: "chip-btn" + (f ? " name-field" : " name-punct") + (i === naming.pick ? " picked" : ""),
+      title: f ? naming.help[f[1]] || "" : PUNCT_NAMES[p] || "" },
+      f ? f[1][0].toUpperCase() + f[1].slice(1) : (p.trim() || "space"));
+    b.addEventListener("click", () => { naming.pick = naming.pick === i ? -1 : i; namingDraw(); });
+    return b;
+  }));
+  if (!naming.pieces.length) box.append(h("span", { class: "muted" }, "Empty: the store's own name is kept."));
+  $("#naming-move").hidden = naming.pick < 0;
+  clearTimeout(naming.timer);
+  naming.timer = setTimeout(namingPreview, 250);
+}
+function namingBody() {
+  const f = $("#naming-form");
+  return { template: naming.pieces.join(""), caps: f.caps.value, joiner: f.joiner.value };
+}
+async function namingPreview() {
+  const prob = $("#naming-problem");
+  try {
+    const r = await api("POST", "naming/preview", namingBody());
+    $("#naming-examples").replaceChildren(...r.examples.map((x) => h("li", {}, x)));
+    prob.hidden = true;
+  } catch (e) { prob.textContent = e.message; prob.hidden = false; }
+}
+function namingSet(template) { naming.pieces = namingSplit(template); naming.pick = -1; namingDraw(); }
+function namingAdd(piece) {
+  const at = naming.pick < 0 ? naming.pieces.length : naming.pick + 1;
+  naming.pieces.splice(at, 0, piece);
+  naming.pick = at;
+  namingDraw();
+}
+async function loadNaming() {
+  const card = $("#naming-card");
+  card.hidden = !isAdmin() || ["pi", "laptop"].includes(S.node_role);
+  if (card.hidden) return;
+  const r = await api("GET", "naming").catch(() => null);
+  if (!r) return;
+  const f = $("#naming-form");
+  if (f.contains(document.activeElement)) return;
+  Object.assign(naming, { default: r.default, fields: r.fields, help: r.help });
+  f.preset.replaceChildren(h("option", { value: "" }, "Pick a style…"), ...r.presets.map((p) => h("option", { value: p.template }, p.name)));
+  f.add_field.replaceChildren(h("option", { value: "" }, "Add…"), ...r.fields.map((x) => h("option", { value: `{${x}}` }, `${x[0].toUpperCase() + x.slice(1)}: ${r.help[x]}`)));
+  f.caps.replaceChildren(...Object.entries(r.caps_options).map(([v, t]) => h("option", { value: v }, t)));
+  f.joiner.replaceChildren(...Object.entries(r.joiners).map(([v, t]) => h("option", { value: v }, t)));
+  f.caps.value = r.caps;
+  f.joiner.value = r.joiner;
+  namingSet(r.template);
+}
+$("#naming-form").preset.addEventListener("change", (e) => { if (e.target.value) namingSet(e.target.value); e.target.value = ""; });
+$("#naming-form").add_field.addEventListener("change", (e) => { if (e.target.value) namingAdd(e.target.value); e.target.value = ""; });
+$("#naming-form").add_punct.addEventListener("change", (e) => { if (e.target.value) namingAdd(e.target.value); e.target.value = ""; });
+$("#naming-form").caps.addEventListener("change", namingDraw);
+$("#naming-form").joiner.addEventListener("change", namingDraw);
+$("#naming-move").addEventListener("click", (e) => {
+  const m = e.target.closest("[data-move]");
+  if (!m || naming.pick < 0) return;
+  const d = +m.dataset.move, i = naming.pick, p = naming.pieces;
+  if (d === 0) { p.splice(i, 1); naming.pick = Math.min(i, p.length - 1); }
+  else if (p[i + d] !== undefined) { [p[i], p[i + d]] = [p[i + d], p[i]]; naming.pick = i + d; }
+  namingDraw();
+});
+$("#naming-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  guarded(async () => { await api("POST", "naming", namingBody()); toast("Saved"); });
+});
+$("#naming-default").addEventListener("click", () => {
+  const f = $("#naming-form");
+  f.caps.value = ""; f.joiner.value = ", ";
+  namingSet(naming.default);
+});
+/* ---------- barcode lookup sources (admin, Household tab) ---------- */
+async function loadFoodSources() {
+  const card = $("#foodsources-card");
+  card.hidden = !isAdmin() || ["pi", "laptop"].includes(S.node_role);
+  if (card.hidden) return;
+  const r = await api("GET", "foodsources").catch(() => null);
+  if (!r) return;
+  const f = $("#foodsources-form");
+  for (const k of ["usda", "upcitemdb"]) f[k].checked = r.sources[k];
+  $("#usda-forget").hidden = !r.usda_own_key;
+  const st = Object.entries(r.status || {}).filter(([, v]) => !v.ok).map(([k, v]) => `${r.names[k]}: ${v.note}`);
+  $("#foodsources-note").textContent = (r.usda_own_key ? "Using your own USDA key. " : "") +
+    (r.label_reader ? "Label reading is on (Tesseract on the hub)." : "Label reading is off: install tesseract-ocr on the hub to read nutrition labels.") +
+    (st.length ? " Last problems: " + st.join("; ") : "");
+}
+$("#foodsources-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const f = e.target, body = { usda: f.usda.checked, upcitemdb: f.upcitemdb.checked };
+  if (f.usda_key.value.trim()) body.usda_key = f.usda_key.value.trim();
+  guarded(async () => { await api("POST", "foodsources", body); f.usda_key.value = ""; toast("Saved"); loadFoodSources(); });
+});
+$("#usda-forget").addEventListener("click", () => guarded(async () => { await api("POST", "foodsources", { forget_usda_key: true }); loadFoodSources(); }));
+/* ---------- read calories off a nutrition label photo (any family member) ---------- */
+function labelShow() {
+  const f = $("#item-form");
+  $("#label-read").hidden = f.category.value !== "food" || $("#per-unit-label").hidden;
+}
+$("#item-form").category.addEventListener("change", labelShow);
+$("#label-read-btn").addEventListener("click", () => $("#label-file").click());
+async function shrinkPhoto(file) {
+  // big phone photos: scale to at most 2000 px and grey, which reads as well and uploads fast
+  const img = await createImageBitmap(file);
+  const k = Math.min(1, 2000 / Math.max(img.width, img.height));
+  const c = document.createElement("canvas");
+  c.width = Math.round(img.width * k); c.height = Math.round(img.height * k);
+  const g = c.getContext("2d");
+  g.filter = "grayscale(1) contrast(1.3)";
+  g.drawImage(img, 0, 0, c.width, c.height);
+  return await new Promise((ok) => c.toBlob(ok, "image/jpeg", 0.9));
+}
+$("#label-file").addEventListener("change", async (e) => {
+  const file = e.target.files[0];
+  e.target.value = "";
+  if (!file) return;
+  const msg = $("#label-msg"), f = $("#item-form");
+  msg.textContent = "Reading the label…";
+  try {
+    const blob = await shrinkPhoto(file).catch(() => file);
+    const res = await fetch("/api/label", { method: "POST", headers: { "X-Bunkr": "1", "Content-Type": "image/jpeg" }, body: blob });
+    const r = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(r.error || "couldn't read that photo");
+    if (!r.kcal) { msg.textContent = "Couldn't find the calories. Try again closer, flat and in good light, or type them in."; return; }
+    let servings = r.servings;
+    if (!servings) {
+      const n = prompt(`${r.kcal} calories per serving. How many servings in one?`, "1");
+      servings = n && +n > 0 ? +n : 0;
+      if (!servings) { msg.textContent = `${r.kcal} calories per serving: type the total for one.`; return; }
+    }
+    const total = Math.round(r.kcal * servings);
+    f.size_value.value = total;
+    updateItemPreview();
+    msg.textContent = `Label: ${r.kcal} calories × ${servings} servings = ${total} each. Check it before saving.`;
+  } catch (err) { msg.textContent = err.message; }
+});
+/* ---------- Kroger barcode lookup (admin, Household tab) ---------- */
+async function loadKroger() {
+  const card = $("#kroger-card");
+  card.hidden = !isAdmin() || ["pi", "laptop"].includes(S.node_role);
+  if (card.hidden) return;
+  const r = await api("GET", "kroger").catch(() => null);
+  if (!r) return;
+  const f = $("#kroger-form");
+  if (!f.contains(document.activeElement)) {
+    f.client_id.value = r.client_id || ""; f.client_secret.value = "";
+    f.client_secret.placeholder = r.has_secret ? "saved: leave empty to keep it" : "from developer.kroger.com";
+  }
+  $("#kroger-forget").hidden = !r.has_secret;
+  const s = r.status || {};
+  $("#kroger-status").textContent = !r.ready ? "Not set up." : s.ok === false ? `Last problem: ${s.error}`
+    : s.at ? `Working. Last lookup ${sinceIso(s.at)}.` : "Set up. Scan something, or press Test it.";
+}
+$("#kroger-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const f = e.target, body = { client_id: f.client_id.value.trim() };
+  if (f.client_secret.value.trim()) body.client_secret = f.client_secret.value.trim();
+  guarded(async () => { await api("POST", "kroger", body); f.client_secret.value = ""; toast("Saved"); loadKroger(); });
+});
+$("#kroger-test").addEventListener("click", () => guarded(async () => {
+  await api("POST", "kroger/test"); toast("Kroger answered. Barcode lookup is working."); loadKroger();
+}).finally(loadKroger));
+$("#kroger-forget").addEventListener("click", () => confirm("Forget the Kroger secret? Lookups there stop until a new one is saved.") &&
+  guarded(async () => { await api("POST", "kroger", { forget_secret: true }); loadKroger(); }));
 /* ---------- local watch (admin, Sites tab) ---------- */
 async function loadLocalWatch() {
   const card = $("#lw-card");
@@ -903,7 +1112,8 @@ function flagButton(target, sourceTitle, storyTitle, after) {
       if (note === null) return;
       guarded(async () => {
         const r = await api("POST", "news/flags", { ...target, note });
-        toast(r.reviewed ? "Taken out. BUNKR will match more carefully." : "Taken out, and sent for review. Thanks.");
+        const where = r.moved_to && r.moved_to !== sourceTitle ? ` Moved to "${r.moved_to.slice(0, 70)}".` : " It's now a story of its own.";
+        toast((r.reviewed ? "Taken out. BUNKR will match more carefully." : "Taken out, and sent for review. Thanks.") + where);
         after && after();
       });
     } }, "Doesn't belong");
@@ -913,11 +1123,14 @@ async function loadNewsFlags() {
   if (!isAdmin()) { box.hidden = true; return; }
   const r = await api("GET", "news/flags").catch(() => null);
   const open = r ? r.flags.filter((f) => f.status === "open") : [];
-  box.hidden = !open.length;
-  if (!open.length) return;
+  const done = r ? r.flags.filter((f) => f.status === "confirmed" && f.kind === "feed").slice(0, 5) : [];
+  box.hidden = !open.length && !done.length;
+  if (box.hidden) return;
   const decide = (f, decision) => guarded(async () => { await api("POST", "news/flags/" + f.id, { decision });
-    toast(decision === "confirm" ? "Confirmed. That match won't count as much again." : "Put back."); loadNewsFlags(); loadNews(); });
-  box.replaceChildren(h("h2", {}, `Flagged sources to review (${open.length})`),
+    toast(decision === "confirm" ? "Confirmed. BUNKR will keep these apart." : decision === "undo" ? "Undone: put back, and the lesson forgotten." : "Put back.");
+    loadNewsFlags(); loadNews(); });
+  const taught = (f) => f.apart ? h("div", { class: "muted" }, `Keeps apart: ${f.apart[0].join(", ")} | ${f.apart[1].join(", ")}`) : null;
+  box.replaceChildren(h("h2", {}, open.length ? `Flagged sources to review (${open.length})` : "News flags"),
     h("p", { class: "muted" }, "Someone said a source isn't about its story. It's already out of the story; confirm, or put it back."),
     h("ul", { class: "plain flag-list" }, ...open.map((f) => h("li", {},
       h("div", {}, h("span", { class: "muted" }, f.kind === "brief" ? `Morning brief ${f.day}: ` : "Story: "), h("strong", {}, f.story_title)),
@@ -926,7 +1139,11 @@ async function loadNewsFlags() {
       h("div", { class: "muted" }, `${f.username || "someone"}, ${sinceIso(f.at)}`, f.note ? `: "${f.note}"` : "",
         f.words.length ? ` · matched on: ${f.words.join(", ")}` : ""),
       h("div", { class: "row gap" }, h("button", { class: "primary", onclick: () => decide(f, "confirm") }, "Right, it doesn't belong"),
-        h("button", { onclick: () => decide(f, "dismiss") }, "It's fine, put it back"))))));
+        h("button", { onclick: () => decide(f, "dismiss") }, "It's fine, put it back"))))),
+    done.length ? h("details", {}, h("summary", {}, `What BUNKR learned from flags (${done.length} recent)`),
+      h("ul", { class: "plain flag-list" }, ...done.map((f) => h("li", {},
+        h("div", {}, h("strong", {}, f.source_title), h("span", { class: "muted" }, " isn't about "), h("strong", {}, f.story_title)),
+        taught(f), h("button", { class: "link", onclick: () => decide(f, "undo") }, "Undo"))))) : null);
 }
 async function loadNews(more = false) {
   if (!more) NEWS.offset = 0;
@@ -1132,7 +1349,7 @@ async function loadBrief(day) {
   const ok = Object.values(b.sources).filter((s) => s.ok && s.count).length;
   const failed = Object.entries(b.sources).filter(([, s]) => !s.ok).map(([k]) => O[k] ? O[k].name : k);
   $("#brief-foot").textContent = `Made ${sinceIso(b.created_at)} from ${b.headline_count} headlines across ${ok} outlets` +
-    (b.ai ? "; summaries by Claude." : ".") + (failed.length ? ` Couldn't reach: ${failed.join(", ")}.` : "") + ` Next brief tomorrow at ${r.settings.time}.`;
+    (b.ai ? "; AI summaries." : ".") + (failed.length ? ` Couldn't reach: ${failed.join(", ")}.` : "") + ` Next brief tomorrow at ${r.settings.time}.`;
 }
 $("#brief-day").addEventListener("change", (e) => loadBrief(e.target.value));
 $("#brief-run").addEventListener("click", () => guarded(async () => {
@@ -1281,6 +1498,16 @@ function drawSitMap() {
     svg.append(el("rect", { x: (C + r * Math.sin(b) - 5).toFixed(1), y: (C - r * Math.cos(b) - 5).toFixed(1), width: 10, height: 10, fill: "currentColor" }));
     const t = el("text", { x: (C + r * Math.sin(b) + 8).toFixed(1), y: (C - r * Math.cos(b) + 4).toFixed(1) }); t.textContent = x.name; svg.append(t);
   }
+  for (const n of SIT.neighbours || []) {  // neighbors: small green dots, tap for who and what they can do
+    const d = kmBetween(centre, n); if (d > MAX) continue;
+    const b = bearing(centre, n), r = rad(d);
+    const c = el("circle", { class: "dot", cx: (C + r * Math.sin(b)).toFixed(1), cy: (C - r * Math.cos(b)).toFixed(1), r: 4.5, fill: "#2e7d32", tabindex: 0 });
+    const t = el("title"); t.textContent = `Neighbor: ${n.name}`; c.append(t);
+    const show = () => detail.replaceChildren(h("p", {}, h("strong", {}, n.name), ` · neighbor${n.place ? " · " + n.place : ""}`,
+      n.skill_labels.length ? h("span", { class: "muted" }, ` · ${n.skill_labels.join(", ")}`) : null));
+    c.addEventListener("click", show); c.addEventListener("keydown", (e) => e.key === "Enter" && show());
+    svg.append(c);
+  }
   svg.append(el("rect", { x: C - 6, y: C - 6, width: 12, height: 12, fill: "currentColor" }));
   box.replaceChildren(svg, detail, here.length ? h("div", {}, h("h3", {}, `At ${centre.name}`), ...here.map((i) => sitItem(i, ""))) : null);
   pick.replaceChildren(sites.length > 1 ? h("p", {}, "Centre on: ", ...sites.map((x) => h("button", { class: x.id === centre.id ? "primary small" : "small",
@@ -1413,6 +1640,7 @@ function updateItemFormForCategory() {
   const show = cash || (!ess.value && (cat === "water" || cat === "food"));
   perUnit.hidden = !show;
   perUnit.firstChild.textContent = cash ? "Value of each bill ($)" : cat === "water" ? "Size of each" : "Calories each";
+  if ($("#label-read")) labelShow();
   perUnit.querySelector("select").hidden = cat !== "water" || cash;
   const f = $("#item-form");
   f.unit.placeholder = cash ? "bills" : "cases, jugs, cans";
@@ -1575,7 +1803,7 @@ async function lookupCode(code) {
     $("#scan-msg").textContent = `${it.name}: you have ${fmtNum(it.quantity)}${it.unit ? " " + it.unit : ""}.`;
     const bump = (n) => guarded(async () => { const x = await api("POST", `items/${it.id}/bump`, { amount: n });
       toast(`${it.name}: now ${fmtNum(x.quantity)}`); refresh(); $("#scan-dialog").close(); });
-    $("#scan-result").replaceChildren(h("div", { class: "actions" }, h("button", { class: "primary", onclick: () => bump(1) }, "Add 1"),
+    $("#scan-result").replaceChildren(h("div", { class: "actions" }, h("button", { class: "primary", onclick: () => bump(1) }, `Add 1${it.unit ? " " + it.unit.replace(/s$/, "") : ""}`),
       h("button", { onclick: () => { const n = prompt("How many to add?", "6"); if (n && +n > 0) bump(+n); } }, "Add more…"),
       h("button", { onclick: () => bump(-1) }, "Used 1"), h("button", { onclick: () => openScan() }, "Scan another")));
     return;
@@ -1587,12 +1815,16 @@ async function lookupCode(code) {
   if (d.category) { f.category.value = d.category; updateItemFormForCategory(); }
   if (d.name) f.name.value = d.name;
   if (d.unit) f.unit.value = d.unit;
+  if (d.pack_size > 1) { f.pack_size.value = d.pack_size; f.pack_unit.value = d.pack_unit || ""; }
   if (d.note) f.notes.value = d.note;
   if (d.size_unit) { f.size_unit.value = d.size_unit; f.size_value.value = +(d.per_unit / (GAL_PER[d.size_unit] || 1)).toPrecision(4); }
   else if (d.per_unit) f.size_value.value = d.per_unit;
   updateItemPreview();
   f.scrollIntoView({ behavior: "smooth" });
-  toast(d.name ? `Found: ${d.name}. Check it, pick where it goes, and save.` : (r.error || "Not found. Type the name and save; BUNKR will remember this barcode."), !d.name);
+  labelShow();
+  const noKcal = d.name && d.category === "food" && !d.per_unit ? " No calories found: tap Read the nutrition label, or type them." :
+    d.kcal_from ? ` Calories from ${d.kcal_from}.` : "";
+  toast(d.name ? `Found: ${d.name}. Check it, pick where it goes, and save.${noKcal}` : (r.error || "Not found. Type the name and save; BUNKR will remember this barcode."), !d.name);
   (d.name ? f.quantity : f.name).focus();
 }
 $("#paste-close").addEventListener("click", () => $("#paste-dialog").close());
@@ -2411,7 +2643,7 @@ $("#mypw-form").addEventListener("submit", (e) => {
   guarded(async () => { await api("POST", "me/password", { current: f.current.value, new: f.new.value }); location.href = "/login.html"; });
 });
 const AUDIT_WORDS = { login: "Logged in", logout: "Logged out", login_failed: "Login failed", change: "Changed", view: "Looked at",
-  connector: "Claude connector", security: "Security", denied: "Refused" };
+  connector: "AI connector", security: "Security", denied: "Refused" };
 const shortWhen = (iso) => new Date(iso).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 async function loadAudit() {
   $("#audit-card").hidden = !(S.require_login && isAdmin());
@@ -2711,6 +2943,243 @@ function renderFirmware() {
   }));
 }
 
+/* ---------- comms: nets and their log, ICS-213 messages, neighbors, licenses, partner hubs ---------- */
+let CM = null, PT = null, editingNet = null, editingIcs = null, editingNb = null, editingLic = null, editingPartner = null;
+const commsWhen = (iso) => iso ? new Date(iso).toLocaleString([], { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "";
+async function loadComms() {
+  const [c, p] = await Promise.all([guarded(() => api("GET", "comms")), guarded(() => api("GET", "partners"))]);
+  if (c) { CM = c; renderComms(); }
+  if (p) { PT = p; renderPartners(); }
+  $("#partner-setup").hidden = !isAdmin();
+  if (isAdmin()) loadShares();
+}
+function fillOnce(sel, pairs) {
+  const el = $(sel);
+  if (!el.options.length) el.replaceChildren(...pairs.map(([v, t]) => h("option", { value: v }, t)));
+}
+function checkList(box, pairs, name) {
+  if (!box.children.length) box.replaceChildren(...pairs.map(([v, t]) => h("label", {}, h("input", { type: "checkbox", name, value: v }), t)));
+}
+async function copyText(text) {
+  try { await navigator.clipboard.writeText(text); toast("Copied"); return; } catch {}
+  const t = h("textarea", { style: "position:fixed;top:0;left:0;opacity:0" }); t.value = text; document.body.append(t); t.select();
+  let ok = false; try { ok = document.execCommand("copy"); } catch {}
+  t.remove();
+  ok ? toast("Copied") : prompt("Copy this:", text);
+}
+function renderComms() {
+  fillOnce("#net-mode", CM.modes.map((m) => [m, m]));
+  fillOnce("#net-day", [["-1", "Every day"], ...CM.weekdays.map((d, i) => [String(i), d])]);
+  fillOnce("#lic-kind", Object.entries(CM.kinds));
+  if ($("#lic-class").options.length === 1) $("#lic-class").append(...CM.classes.map((c) => h("option", { value: c }, c)));
+  checkList($("#nb-skills"), Object.entries(CM.skills), "skills");
+  if ($("#nb-filter").options.length === 1) $("#nb-filter").append(...Object.entries(CM.skills).map(([k, v]) => h("option", { value: k }, v)));
+  const edit = CM.can_edit && CM.hub;
+  $("#net-edit").hidden = !edit; $("#nb-edit").hidden = !edit; $("#ics-edit").hidden = !CM.can_edit;
+  $("#lic-edit").hidden = !CM.hub || !(CM.can_edit || CM.me);
+  $("#lic-person").replaceChildren(...CM.people.filter((p) => CM.can_edit || p.id === CM.me).map((p) => h("option", { value: p.id }, p.name)));
+  renderNets(edit); renderIcs(); renderNeighbours(edit); renderLicences();
+}
+function renderNets(edit) {
+  $("#net-list").replaceChildren(...(CM.nets.length ? CM.nets.map((n) => h("li", {},
+    h("span", { class: n.active ? "" : "muted" }, h("strong", {}, n.name), h("span", { class: "tag" }, n.mode),
+      h("div", { class: "muted" }, [n.when, n.freq, n.net_control && "Net control " + n.net_control, n.notes].filter(Boolean).join(" · "))),
+    edit ? h("span", {}, h("button", { class: "link", onclick: () => editNet(n) }, "Edit"),
+      h("button", { class: "danger", onclick: () => confirm(`Remove the ${n.name} net? Its log entries stay.`) &&
+        guarded(async () => { await api("DELETE", "nets/" + n.id); loadComms(); }) }, "Remove")) : null))
+    : [h("li", { class: "muted" }, "No nets yet.")]));
+  $("#netlog-form").hidden = !CM.nets.length;
+  $("#netlog-net").replaceChildren(...CM.nets.filter((n) => n.active).map((n) => h("option", { value: n.id }, n.name)));
+  $("#netlog-table tbody").replaceChildren(...(CM.net_log.length ? CM.net_log.map((l) => h("tr", {},
+    h("td", {}, commsWhen(l.at)), h("td", {}, l.net_name), h("td", {}, l.who), h("td", {}, l.signal), h("td", {}, l.notes),
+    h("td", {}, CM.can_edit ? h("button", { class: "danger", onclick: () => confirm("Remove this entry?") &&
+      guarded(async () => { await api("DELETE", "net-log/" + l.id); loadComms(); }) }, "Remove") : null)))
+    : [h("tr", {}, h("td", { colspan: 6, class: "muted" }, CM.nets.length ? "No check-ins logged yet." : "Add a net first."))]));
+}
+function editNet(n) {
+  editingNet = n.id;
+  const f = $("#net-form");
+  for (const k of ["name", "freq", "mode", "time", "net_control", "notes"]) f[k].value = n[k] ?? "";
+  f.weekday.value = String(n.weekday);
+  $("#net-edit").open = true; $("#net-cancel").hidden = false; f.scrollIntoView({ behavior: "smooth" });
+}
+$("#net-cancel").addEventListener("click", () => { editingNet = null; $("#net-form").reset(); $("#net-cancel").hidden = true; });
+$("#net-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  guarded(async () => {
+    await api("POST", "nets" + (editingNet ? "/" + editingNet : ""), Object.fromEntries(new FormData(e.target)));
+    toast("Net saved"); editingNet = null; e.target.reset(); $("#net-cancel").hidden = true; loadComms();
+  });
+});
+$("#netlog-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  guarded(async () => {
+    await api("POST", "net-log", Object.fromEntries(new FormData(e.target)));
+    toast("Logged"); e.target.who.value = ""; e.target.signal.value = ""; e.target.notes.value = ""; loadComms();
+  });
+});
+function renderIcs() {
+  $("#ics-list").replaceChildren(...(CM.messages.length ? CM.messages.map((m) => h("li", {},
+    h("span", {}, h("strong", {}, m.subject || "(no subject)"), h("span", { class: "tag" }, m.direction === "received" ? "received" : "sent"),
+      h("div", { class: "muted" }, `To ${m.to_name} · from ${m.from_name} · ${m.msg_date} ${m.msg_time}`)),
+    h("span", {}, h("button", { class: "small", onclick: () => copyText(m.text) }, "Copy as plain text"), " ",
+      h("a", { class: "btn small", href: `/api/ics213/${m.id}/print.html`, target: "_blank", rel: "noopener" }, "Print"),
+      CM.can_edit ? h("button", { class: "link", onclick: () => editIcs(m) }, "Edit") : null,
+      CM.can_edit ? h("button", { class: "danger", onclick: () => confirm("Delete this message?") &&
+        guarded(async () => { await api("DELETE", "ics213/" + m.id); loadComms(); }) }, "Delete") : null)))
+    : [h("li", { class: "muted" }, "No messages yet.")]));
+}
+function editIcs(m) {
+  editingIcs = m.id;
+  const f = $("#ics-form");
+  for (const k of ["direction", "incident", "to_name", "to_position", "from_name", "from_position", "subject", "msg_date", "msg_time",
+    "message", "approved_name", "approved_position", "reply", "reply_name", "reply_position", "reply_at"]) f[k].value = m[k] ?? "";
+  $("#ics-edit").open = true; $("#ics-summary").textContent = "Edit message"; $("#ics-cancel").hidden = false; f.scrollIntoView({ behavior: "smooth" });
+}
+function resetIcs() { editingIcs = null; $("#ics-form").reset(); $("#ics-cancel").hidden = true; $("#ics-summary").textContent = "Write a message"; }
+$("#ics-cancel").addEventListener("click", resetIcs);
+$("#ics-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  guarded(async () => {
+    await api("POST", "ics213" + (editingIcs ? "/" + editingIcs : ""), Object.fromEntries(new FormData(e.target)));
+    toast("Message saved"); resetIcs(); loadComms();
+  });
+});
+function renderNeighbours(edit) {
+  const want = $("#nb-filter").value;
+  const list = CM.neighbours.filter((n) => !want || n.skills.includes(want));
+  $("#nb-list").replaceChildren(...(list.length ? list.map((n) => h("div", { class: "med" },
+    h("div", { class: "t" }, n.name, ...n.skill_labels.map((s) => h("span", { class: "chip" }, s))),
+    h("div", { class: "m" }, [n.place, n.callsign].filter(Boolean).join(" · "),
+      n.phone ? [n.place || n.callsign ? " · " : "", h("a", { href: "tel:" + n.phone.replace(/[^\d+]/g, "") }, n.phone)] : null,
+      n.contact ? ` · ${n.contact}` : ""),
+    n.notes ? h("div", { class: "m muted" }, n.notes) : null,
+    edit ? h("div", { class: "m" }, h("button", { class: "link", onclick: () => editNeighbour(n) }, "Edit"), " · ",
+      h("button", { class: "link", onclick: () => confirm(`Remove ${n.name}?`) && guarded(async () => { await api("DELETE", "neighbours/" + n.id); loadComms(); }) }, "Remove")) : null))
+    : [h("p", { class: "muted" }, CM.neighbours.length ? "Nobody with that skill yet." : "No neighbors yet.")]));
+}
+$("#nb-filter").addEventListener("change", () => CM && renderNeighbours(CM.can_edit && CM.hub));
+function editNeighbour(n) {
+  editingNb = n.id;
+  const f = $("#nb-form");
+  for (const k of ["name", "place", "phone", "callsign", "contact", "lat", "lon", "skills_other", "notes"]) f[k].value = n[k] ?? "";
+  $$("#nb-skills input").forEach((i) => (i.checked = n.skills.includes(i.value)));
+  $("#nb-edit").open = true; $("#nb-summary").textContent = `Edit ${n.name}`; $("#nb-cancel").hidden = false; f.scrollIntoView({ behavior: "smooth" });
+}
+function resetNb() { editingNb = null; $("#nb-form").reset(); $("#nb-cancel").hidden = true; $("#nb-summary").textContent = "Add a neighbor"; }
+$("#nb-cancel").addEventListener("click", resetNb);
+$("#nb-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const data = Object.fromEntries(new FormData(e.target));
+  data.skills = $$("#nb-skills input:checked").map((i) => i.value);
+  guarded(async () => { await api("POST", "neighbours" + (editingNb ? "/" + editingNb : ""), data); toast("Saved"); resetNb(); loadComms(); });
+});
+const LIC_STATE = { soon: ["warn", (s) => `in ${s.days} d`], expired: ["bad", () => "expired"], done: ["", () => "done"], later: ["", () => ""] };
+function renderLicences() {
+  $("#lic-due").replaceChildren(CM.due.length ? h("ul", { class: "plain" }, ...CM.due.map((d) => h("li", {},
+    h("strong", { class: d.status.state === "expired" ? "bad" : "warn" }, d.message)))) : null);
+  const mine = (l) => CM.hub && (CM.can_edit || l.person_id === CM.me);
+  $("#lic-table tbody").replaceChildren(...(CM.licences.length ? CM.licences.map((l) => {
+    const st = l.status && LIC_STATE[l.status.state];
+    return h("tr", {}, h("td", {}, l.person), h("td", {}, l.title, l.notes ? h("div", { class: "muted" }, l.notes) : null),
+      h("td", {}, [l.callsign, l.number].filter(Boolean).join(" · ")),
+      h("td", {}, l.expires ? h("span", { class: st ? st[0] : "" }, l.expires + (st && st[1](l.status) ? ` · ${st[1](l.status)}` : "")) : h("span", { class: "muted" }, "—")),
+      h("td", {}, mine(l) ? [h("button", { class: "link", onclick: () => editLicence(l) }, "Edit"),
+        h("button", { class: "danger", onclick: () => confirm(`Remove ${l.person}'s ${l.title}?`) &&
+          guarded(async () => { await api("DELETE", "licences/" + l.id); loadComms(); }) }, "Remove")] : null));
+  }) : [h("tr", {}, h("td", { colspan: 5, class: "muted" }, "Nothing yet. Add ham and GMRS licenses, CPR and first aid cards."))]));
+}
+function editLicence(l) {
+  editingLic = l.id;
+  const f = $("#lic-form");
+  for (const k of ["person_id", "kind", "label", "class", "callsign", "number", "expires", "notes"]) f[k].value = l[k] ?? "";
+  $("#lic-edit").open = true; $("#lic-summary").textContent = "Edit"; $("#lic-cancel").hidden = false; f.scrollIntoView({ behavior: "smooth" });
+}
+function resetLic() { editingLic = null; $("#lic-form").reset(); $("#lic-cancel").hidden = true; $("#lic-summary").textContent = "Add a license or certificate"; }
+$("#lic-cancel").addEventListener("click", resetLic);
+$("#lic-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  guarded(async () => { await api("POST", "licences" + (editingLic ? "/" + editingLic : ""), Object.fromEntries(new FormData(e.target)));
+    toast("Saved"); resetLic(); loadComms(); });
+});
+function partnerChannel(c) {
+  const tx = c.duplex === "+" ? c.rx_mhz + c.offset_mhz : c.duplex === "-" ? c.rx_mhz - c.offset_mhz : c.duplex === "split" ? c.offset_mhz : null;
+  return [c.rx_mhz != null ? c.rx_mhz.toFixed(4) : "", tx != null ? `TX ${tx.toFixed(4)}` : c.duplex === "off" ? "listen only" : "",
+    c.tx_tone || c.rx_tone ? tonePair(c) : "", c.mode].filter(Boolean).join(" · ");
+}
+function renderPartners() {
+  $("#partner-cards").replaceChildren(...PT.partners.map((p) => {
+    const d = p.data || {};
+    const has = (k) => Array.isArray(d[k]) && d[k].length;
+    return h("div", { class: "card" },
+      h("div", { class: "row" }, h("h2", {}, p.name, h("span", { class: "tag" }, "partner")),
+        h("span", { class: "muted" }, d.as_of ? `as of ${commsWhen(d.as_of)}` : "not read yet")),
+      p.last_error ? h("p", { class: "warn" }, `Couldn't update: ${p.last_error}.` + (d.as_of ? " Showing the last copy." : "")) : null,
+      d.call ? h("p", {}, h("strong", { class: "bad" }, `${d.call.drill ? "DRILL: " : ""}${d.call.label}${d.call.place ? " " + d.call.place : ""}`),
+        d.call.message ? ` · ${d.call.message}` : "", h("span", { class: "muted" }, ` · since ${commsWhen(d.call.created_at)}`)) : null,
+      has("board") ? h("ul", { class: "plan-list" }, ...d.board.map((b) => h("li", {}, h("span", {}, b.name),
+        h("span", { class: b.status === "help" ? "bad" : b.status === "safe" ? "good" : "" }, b.status_label || "no check-in",
+          b.at ? h("span", { class: "muted" }, ` · ${commsWhen(b.at)}`) : null)))) : null,
+      has("nets") ? h("div", {}, h("h3", {}, "Their nets"), h("ul", { class: "plan-list" }, ...d.nets.map((n) => h("li", {},
+        h("span", {}, h("strong", {}, n.name), h("div", { class: "muted" }, [n.when, n.freq, n.mode, n.net_control && "NC " + n.net_control].filter(Boolean).join(" · "))))))) : null,
+      has("channels") ? h("div", {}, h("h3", {}, "Their channels"), h("ul", { class: "plan-list" }, ...d.channels.map((c) => h("li", {},
+        h("span", {}, c.name), h("span", { class: "muted" }, partnerChannel(c)))))) : null,
+      has("radios") ? h("p", { class: "muted" }, "Radios: " + d.radios.map((r) => [r.name, r.model].filter(Boolean).join(" ")).join(", ")) : null,
+      has("callsigns") ? h("p", { class: "muted" }, "Callsigns: " + d.callsigns.map((c) => `${c.name} ${c.callsign}`).join(", ")) : null);
+  }));
+  if (!isAdmin()) return;
+  $("#partner-list").replaceChildren(...PT.partners.map((p) => h("li", {},
+    h("span", {}, h("strong", {}, p.name), h("div", { class: "muted" }, [p.url, p.has_token ? "token saved" : "no token",
+      p.fetched_at ? "read " + commsWhen(p.fetched_at) : "", p.last_error].filter(Boolean).join(" · "))),
+    h("span", {}, h("button", { class: "small", onclick: () => guarded(async () => { PT = await api("POST", `partners/${p.id}/pull`); renderPartners(); toast(PT.partners.find((x) => x.id === p.id)?.last_error || "Updated"); }) }, "Read now"),
+      h("button", { class: "link", onclick: () => editPartner(p) }, "Edit"),
+      h("button", { class: "danger", onclick: () => confirm(`Stop reading ${p.name}? Their saved copy and token are deleted.`) &&
+        guarded(async () => { await api("DELETE", "partners/" + p.id); loadComms(); }) }, "Remove")))));
+}
+function editPartner(p) {
+  editingPartner = p.id;
+  const f = $("#partner-form");
+  f.name.value = p.name; f.url.value = p.url; f.token.value = "";
+  $("#partner-cancel").hidden = false; f.scrollIntoView({ behavior: "smooth" });
+}
+$("#partner-cancel").addEventListener("click", () => { editingPartner = null; $("#partner-form").reset(); $("#partner-cancel").hidden = true; });
+$("#partner-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const data = Object.fromEntries(new FormData(e.target));
+  guarded(async () => {
+    await api("POST", "partners" + (editingPartner ? "/" + editingPartner : ""), data);
+    toast("Saved. Reading it now…"); editingPartner = null; e.target.reset(); $("#partner-cancel").hidden = true;
+    setTimeout(loadComms, 3000);
+  });
+});
+let SHARES = null;
+async function loadShares() {
+  const r = await guarded(() => api("GET", "partner-shares"));
+  if (!r) return;
+  SHARES = r;
+  checkList($("#share-parts"), Object.entries(r.parts), "parts");
+  $("#share-list").replaceChildren(...r.shares.map((s) => h("li", {},
+    h("span", { class: s.revoked_at ? "muted" : "" }, h("strong", {}, s.name), s.revoked_at ? h("span", { class: "tag" }, "turned off") : null,
+      h("div", { class: "muted" }, [s.parts.map((p) => r.parts[p]).join(", "), `made ${commsWhen(s.created_at)}`,
+        s.last_used_at ? `last read ${commsWhen(s.last_used_at)} (${s.uses}×)` : "never read"].join(" · "))),
+    s.revoked_at ? null : h("button", { class: "danger", onclick: () => confirm(`Turn off the share for ${s.name}? Their hub stops getting updates.`) &&
+      guarded(async () => { await api("DELETE", "partner-shares/" + s.id); toast("Turned off"); loadShares(); }) }, "Turn off"))));
+}
+$("#share-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const parts = $$("#share-parts input:checked").map((i) => i.value);
+  guarded(async () => {
+    const r = await api("POST", "partner-shares", { name: e.target.name.value, parts });
+    e.target.reset();
+    $("#share-new").replaceChildren(h("div", { class: "card" },
+      h("p", {}, h("strong", {}, "Give these two to your partner now. The token is shown only this once.")),
+      h("p", {}, "Address: ", h("code", {}, r.url), " ", h("button", { class: "small", onclick: () => copyText(r.url) }, "Copy")),
+      h("p", {}, "Token: ", h("code", { style: "word-break:break-all" }, r.token), " ", h("button", { class: "small", onclick: () => copyText(r.token) }, "Copy")),
+      h("button", { class: "link", onclick: () => $("#share-new").replaceChildren() }, "Done, hide it")));
+    loadShares();
+  });
+});
+
 /* ---------- medical ---------- */
 let MED = null, editingMed = null;
 async function loadMedical() {
@@ -2855,6 +3324,144 @@ $("#pw-dev-form").addEventListener("submit", (e) => {
   guarded(async () => {
     await api("POST", editingDev ? `power/devices/${editingDev.id}` : "power/devices", body);
     toast("Saved"); $("#pw-dev-cancel").click(); loadPower(); refresh();
+  });
+});
+
+/* ---------- recovery: home inventory, food plan, money and accounts ---------- */
+let RC = null, editingRc = null, FIN = null, editingFin = null;
+const usd = (v) => v == null ? "" : "$" + Number(v).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+async function loadRecovery() {
+  loadMealPlan();
+  const r = await guarded(() => api("GET", "recovery"));
+  if (!r) return;
+  RC = r;
+  const canEdit = isAdmin() || S.can_call;
+  $("#rc-edit-box").hidden = !canEdit;
+  $("#rc-totals").textContent = r.totals.items ? `${r.totals.items} items. Paid ${usd(r.totals.price_paid)}, to replace ${usd(r.totals.replacement_value)}.`
+    : "Nothing here yet. Start with the big things: TVs, computers, furniture, appliances, jewelry, tools.";
+  const sel = $("#rc-item-room"), keep = sel.value;
+  sel.replaceChildren(h("option", { value: "" }, "No room"), ...r.rooms.map((x) => h("option", { value: x.id }, x.name)));
+  sel.value = keep;
+  if (!$("#rc-cats").options.length) $("#rc-cats").replaceChildren(...r.categories.map((c) => h("option", { value: c })));
+  $("#rc-rooms").replaceChildren(...r.rooms.map((x) => h("span", { class: "tag" }, `${x.name} (${x.item_count})`,
+    canEdit ? h("button", { class: "link", "aria-label": `Rename ${x.name}`, onclick: () => {
+      const name = prompt("Room name", x.name);
+      if (name) guarded(async () => { await api("POST", `recovery/rooms/${x.id}`, { name }); loadRecovery(); });
+    } }, " ✎") : null,
+    canEdit ? h("button", { class: "link", "aria-label": `Remove ${x.name}`, onclick: () => confirm(`Remove the room ${x.name}? Its items stay, with no room.`) &&
+      guarded(async () => { await api("DELETE", `recovery/rooms/${x.id}`); loadRecovery(); }) }, " ×") : null)));
+  const groups = new Map();
+  for (const it of r.items) { const k = it.room || "No room"; if (!groups.has(k)) groups.set(k, []); groups.get(k).push(it); }
+  $("#rc-items").replaceChildren(...[...groups].map(([room, list]) => h("div", { class: "card" },
+    h("div", { class: "row" }, h("h2", {}, room), h("span", { class: "muted" },
+      `${list.length} items · to replace ${usd(list.reduce((a, i) => a + (i.replacement_value || 0), 0))}`)),
+    h("ul", { class: "plain" }, ...list.map((it) => rcItem(it, canEdit))))));
+  if (isAdmin()) loadFinance(); else $("#fin-card").hidden = true;
+}
+function rcItem(it, canEdit) {
+  const photos = it.files.filter((f) => f.kind === "photo"), receipts = it.files.filter((f) => f.kind === "receipt");
+  const pick = (kind) => {
+    const inp = h("input", { type: "file", accept: kind === "photo" ? "image/jpeg,image/png,image/webp" : "image/jpeg,image/png,image/webp,application/pdf", hidden: true });
+    inp.addEventListener("change", () => inp.files[0] && guarded(async () => {
+      const f = inp.files[0];
+      if (f.size > RC.limits.max_mb * 1048576) throw new Error(`Files can be up to ${RC.limits.max_mb} MB.`);
+      const res = await fetch(`/api/recovery/items/${it.id}/files?kind=${kind}&name=${encodeURIComponent(f.name)}`,
+        { method: "POST", headers: { "X-Bunkr": "1", "Content-Type": f.type || "application/octet-stream" }, body: f });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || res.statusText);
+      toast("Added"); loadRecovery();
+    }));
+    document.body.append(inp);
+    inp.click();
+    setTimeout(() => inp.remove(), 60000);
+  };
+  const delFile = (f) => confirm(`Remove this ${f.kind}?`) && guarded(async () => { await api("DELETE", `recovery/files/${f.id}`); loadRecovery(); });
+  return h("li", {},
+    h("strong", {}, it.name), it.category ? h("span", { class: "tag" }, it.category) : null,
+    h("div", { class: "muted" }, [it.make_model, it.serial ? `Serial ${it.serial}` : "", it.purchased ? `bought ${it.purchased}` : "",
+      it.price_paid != null ? `paid ${usd(it.price_paid)}` : "", it.replacement_value != null ? `to replace ${usd(it.replacement_value)}` : ""].filter(Boolean).join(" · ")),
+    it.notes ? h("div", { class: "muted" }, it.notes) : null,
+    photos.length ? h("div", { class: "rc-thumbs" }, ...photos.map((f) => h("span", {},
+      h("a", { href: `/api/recovery/files/${f.id}`, target: "_blank", rel: "noopener" }, h("img", { src: `/api/recovery/files/${f.id}`, alt: `Photo of ${it.name}`, loading: "lazy" })),
+      canEdit ? h("button", { class: "link", "aria-label": "Remove photo", onclick: () => delFile(f) }, "×") : null))) : null,
+    receipts.length ? h("div", {}, "Receipts: ", ...receipts.map((f, n) => h("span", {}, n ? ", " : "",
+      h("a", { href: `/api/recovery/files/${f.id}`, target: "_blank", rel: "noopener" }, f.name || `receipt ${n + 1}`),
+      h("button", { class: "link", "aria-label": "Remove receipt", onclick: () => delFile(f) }, " ×")))) : null,
+    canEdit ? h("div", {}, h("button", { class: "link", onclick: () => pick("photo") }, "Add photo"),
+      isAdmin() ? [" · ", h("button", { class: "link", onclick: () => pick("receipt") }, "Add receipt")] : null, " · ",
+      h("button", { class: "link", onclick: () => editRc(it) }, "Edit"), " · ",
+      h("button", { class: "link", onclick: () => confirm(`Remove ${it.name} and its photos?`) && guarded(async () => { await api("DELETE", `recovery/items/${it.id}`); loadRecovery(); }) }, "Remove")) : null);
+}
+function editRc(it) {
+  editingRc = it;
+  const f = $("#rc-item-form");
+  for (const k of ["name", "room_id", "category", "make_model", "serial", "purchased", "price_paid", "replacement_value", "notes"]) if (f[k]) f[k].value = it[k] ?? "";
+  $("#rc-edit-box").open = true;
+  $("#rc-item-save").textContent = "Save"; $("#rc-item-cancel").hidden = false;
+  f.scrollIntoView({ behavior: "smooth", block: "center" });
+}
+$("#rc-item-cancel").addEventListener("click", () => { editingRc = null; $("#rc-item-form").reset(); $("#rc-item-save").textContent = "Add item"; $("#rc-item-cancel").hidden = true; });
+$("#rc-item-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const body = Object.fromEntries(new FormData(e.target));
+  if (!isAdmin()) delete body.serial;
+  guarded(async () => {
+    await api("POST", editingRc ? `recovery/items/${editingRc.id}` : "recovery/items", body);
+    const room = e.target.room_id.value;
+    toast("Saved"); $("#rc-item-cancel").click(); e.target.room_id.value = room; e.target.name.focus(); loadRecovery();
+  });
+});
+$("#rc-room-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  guarded(async () => { const r = await api("POST", "recovery/rooms", { name: e.target.name.value }); e.target.reset(); await loadRecovery(); $("#rc-item-room").value = r.id; });
+});
+
+async function loadMealPlan() {
+  const days = Math.max(1, Math.min(90, parseInt($("#mp-days").value, 10) || 7));
+  $("#mp-print").href = `/api/meal-plan.html?days=${days}`;
+  const m = await guarded(() => api("GET", `meal-plan?days=${days}`));
+  if (!m) return;
+  const unitsTxt = (x) => `${fmtNum(x.units)} ${x.unit || ""}`.trim();
+  $("#mp-out").replaceChildren(
+    h("p", {}, h("strong", {}, `Food lasts about ${fmtNum(m.food_days)} days`), ` for ${m.people} people (${m.kcal_day.toLocaleString()} kcal a day).`),
+    m.eat_first.length ? h("div", {}, h("h3", {}, "Eat these first"), h("ul", { class: "plain" }, ...m.eat_first.slice(0, 12).map((f) =>
+      h("li", { class: f.expired ? "bad" : "" }, h("strong", {}, f.name), ` ${unitsTxt(f)} · ${f.expired ? "expired" : "use by"} ${f.expires}` + (f.location ? ` · ${f.location}` : ""))))) : null,
+    h("details", {}, h("summary", {}, `Day by day (${m.days} days)`), h("ul", { class: "plain" }, ...m.plan.map((d) => h("li", {},
+      h("strong", {}, `Day ${d.day}: `), d.eat.length ? d.eat.map((x) => `${unitsTxt(x)} ${x.name}`).join(", ") : "nothing left",
+      d.short ? h("span", { class: "warn" }, ` (short ${d.short.toLocaleString()} kcal)`) : null)))),
+    m.no_kcal.length ? h("p", { class: "muted" }, `No calories set, so not in the plan: ${m.no_kcal.join(", ")}. Add them in Inventory.`) : null);
+}
+$("#mp-days").addEventListener("change", loadMealPlan);
+
+async function loadFinance() {
+  const r = await guarded(() => api("GET", "finance"));
+  $("#fin-card").hidden = !r;
+  if (!r) return;
+  FIN = r;
+  if (!$("#fin-kind").options.length) $("#fin-kind").replaceChildren(...Object.entries(r.kinds).map(([k, v]) => h("option", { value: k }, v)));
+  $("#fin-list").replaceChildren(r.accounts.length ? h("ul", { class: "plain" }, ...r.accounts.map((a) => h("li", {},
+    h("strong", {}, a.institution), h("span", { class: "tag" }, r.kinds[a.kind] || "Other"), a.last4 ? ` ends in ${a.last4}` : "", a.holder ? ` · ${a.holder}` : "",
+    h("div", { class: "muted" }, [a.phone, a.website, a.contact ? `Call: ${a.contact}` : "", a.paperwork ? `Paperwork: ${a.paperwork}` : ""].filter(Boolean).join(" · ")),
+    a.notes ? h("div", { class: "muted" }, a.notes) : null,
+    h("div", {}, h("button", { class: "link", onclick: () => editFin(a) }, "Edit"), " · ",
+      h("button", { class: "link", onclick: () => confirm(`Remove ${a.institution}?`) && guarded(async () => { await api("DELETE", `finance/${a.id}`); loadFinance(); }) }, "Remove")))))
+    : h("p", { class: "muted" }, "No accounts yet: bank, credit cards, home and car insurance, retirement, loans, utilities."));
+}
+function editFin(a) {
+  editingFin = a;
+  const f = $("#fin-form");
+  for (const k of ["institution", "kind", "holder", "last4", "phone", "website", "contact", "paperwork", "notes"]) f[k].value = a[k] ?? "";
+  $("#fin-box").open = true;
+  $("#fin-save").textContent = "Save"; $("#fin-cancel").hidden = false;
+  f.scrollIntoView({ behavior: "smooth", block: "center" });
+}
+$("#fin-cancel").addEventListener("click", () => { editingFin = null; $("#fin-form").reset(); $("#fin-save").textContent = "Add"; $("#fin-cancel").hidden = true; });
+$("#fin-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const body = Object.fromEntries(new FormData(e.target));
+  guarded(async () => {
+    await api("POST", editingFin ? `finance/${editingFin.id}` : "finance", body);
+    toast("Saved"); $("#fin-cancel").click(); loadFinance();
   });
 });
 
@@ -3083,7 +3690,9 @@ function renderCalendar() {
       c.kind === "task" ? h("button", { class: "link", onclick: () => guarded(async () => { await api("POST", `tasks/${c.id}/done`); toast("Done"); loadFamily(); }) }, "Done") :
       c.kind === "node" && isAdmin() ? h("button", { class: "link", onclick: () => guarded(async () => { await api("POST", `nodes/${c.id}/reminder`, { kind: c.reminder }); loadFamily(); }) }, "Done") :
       c.kind === "renew" ? h("button", { class: "link", onclick: () => confirm(`Mark "${c.title}" done? Reminders stop. Set the next date on the Documents tab.`) &&
-        guarded(async () => { await api("POST", `documents/${c.id}/renewed`); toast("Done"); loadFamily(); }) }, "Done") : null))));
+        guarded(async () => { await api("POST", `documents/${c.id}/renewed`); toast("Done"); loadFamily(); }) }, "Done") :
+      c.kind === "licence" ? h("button", { class: "link", onclick: () => confirm(`Mark "${c.title}" done? Reminders stop. Set the new date on the Comms tab.`) &&
+        guarded(async () => { await api("POST", `licences/${c.id}/renewed`); toast("Done"); loadFamily(); }) }, "Done") : null))));
   $("#task-list").replaceChildren(...F.tasks.map((t) => h("li", {},
     h("span", { class: t.active ? "" : "muted" }, t.title, h("span", { class: "why" }, ` · ${t.every_days ? "every " + t.every_days + " days" : "yearly " + t.yearly}`)),
     h("span", {}, h("button", { class: "link", onclick: () => guarded(async () => { await api("POST", `tasks/${t.id}/active`, { active: !t.active }); loadFamily(); }) }, t.active ? "Turn off" : "Turn on"),

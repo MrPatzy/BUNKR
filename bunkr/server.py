@@ -12,6 +12,7 @@ import mimetypes
 import os
 import re
 import secrets
+import shlex
 import sqlite3
 import sys
 import threading
@@ -25,8 +26,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
-from . import brief, flights, homeassistant, mesh, meshbot, news, checkins, chirp, family, field, notify, situation, maps as mapspack, mcp, mcp_tools, radioplan, radio, releases, scenarios
-from . import __version__, audit, auth, backup, localwatch, mailer, renewals, selfupdate, homelayout, builder, dbcheck, kiwix, mfa, vault, medical, power, quickadd, drives, export, gaps, hazards, kits, library, manifest, nodes, planner, sites, sync
+from . import comms, partners, brief, flights, homeassistant, mesh, meshbot, news, checkins, chirp, family, field, notify, situation, maps as mapspack, mcp, mcp_tools, radioplan, radio, releases, scenarios
+from . import ai as aimod
+from . import packages as ospackages
+from . import foodsources, labelread
+from . import __version__, audit, auth, backup, kroger, localwatch, naming, mailer, renewals, selfupdate, homelayout, builder, dbcheck, kiwix, mfa, vault, medical, power, quickadd, recovery, drives, export, gaps, hazards, kits, library, manifest, nodes, planner, sites, sync
 from .depot import Depot
 from .db import COUNTS_HOME_DEFAULT, LOCATION_KINDS, SITE_KINDS, Store, guess_kind
 
@@ -48,24 +52,26 @@ def host_allowed(host_header, allowed=None):
     return host in (ALLOWED_HOSTS if allowed is None else allowed)
 
 REQUIRE_LOGIN = False   # --require-login: every page and API call needs a session
-PUBLIC_URL = ""          # --public-url: the address Claude's connector uses (default: from the request)
+PUBLIC_URL = ""          # --public-url: the address the optional AI connector uses (default: from the request)
 OPEN_NETS = []          # --open-net: clients here get the read-only field page without a login
 OPEN_API = {"/api/report.html"}  # read-only pages the field page links to
 ROLE = "standalone"     # --role hub | pi | laptop | standalone
 HUB_URL = ""
 # Areas only admins may use: they read local files, write drives or manage the system.
 ADMIN_HEADS = {"audit", "audit.csv", "lock", "browse", "documents", "drives", "library", "plan", "build", "cancel", "job", "backups",
-               "depot", "nodes", "users", "conflicts", "maps", "chirp", "home", "homeassistant", "mail", "localwatch"}
+               "depot", "nodes", "users", "conflicts", "maps", "chirp", "home", "homeassistant", "mail", "localwatch", "kroger", "naming", "foodsources", "ai",
+               "partner-shares", "finance", "finance-sheet.html"}  # finance: the financial access sheet, treated like firearms
 # what a phone may keep for when there's no connection (the service worker saves these and nothing else)
-OFFLINE_HEADS = {"state", "me", "board", "family", "medical", "situation", "brief", "news", "flights", "power", "notices"}
+OFFLINE_HEADS = {"state", "me", "board", "family", "medical", "situation", "brief", "news", "flights", "power", "notices", "comms", "partners"}
+# the Comms tab: licenses, neighbors, nets and their log, ICS-213 messages, partner hubs (bunkr/comms.py, partners.py)
+COMMS_HEADS = {"comms", "licences", "neighbours", "nets", "net-log", "ics213", "partners", "partner-shares"}
 QUIET_CHANGES = ("/api/me/home", "/api/me/news", "/api/news/read", "/api/news/rate", "/api/notices/read")
 _pair_failures = []
 store = None
 depot = None
 notifier = None
 MESH = {"link": None}  # the MeshCore radio link on this machine (bunkr/mesh.py)
-BRIEF = {"enabled": True, "time": "06:30", "tz": "America/Denver", "ai": True,
-         "env_file": "", "claude": "claude"}    # --brief-* options; env_file holds CLAUDE_CODE_OAUTH_TOKEN
+BRIEF = {"enabled": True, "time": "06:30", "tz": "America/Denver", "ai": True}    # --brief-* options; "ai": False = --no-brief-ai
 _brief_lock = threading.Lock()
 scheduler = None
 job = builder.Job()
@@ -377,6 +383,15 @@ def kiwix_watch():
     if seen != KIWIX["seen"] or (seen and not m.running()):
         KIWIX["seen"] = seen
         m.refresh()
+
+
+def cache_packages():
+    """Weekly on the hub: keep the OS packages BUNKR can use (Tesseract) in the store, for installs with no internet."""
+    try:
+        r = ospackages.cache(depot)
+        store.set_raw("os_packages", r | {"ok": True, "at": datetime.now(timezone.utc).isoformat(timespec="seconds")})
+    except Exception as exc:
+        store.set_raw("os_packages", {"ok": False, "error": str(exc)[:200], "at": datetime.now(timezone.utc).isoformat(timespec="seconds")})
 
 
 def node_plan(node):
@@ -898,7 +913,7 @@ def publish_generated():
 
 def _published_extras():
     """The family plan travels to the Pi and laptop as a plain page (behind the node's login)."""
-    return {"plan/family-plan.html": family_plan(), "plan/medical-cards.html": medical_cards()}
+    return {"plan/family-plan.html": family_plan(), "plan/medical-cards.html": medical_cards(), "plan/kids-plan.html": kids_plan()}
 
 
 def medical_cards():
@@ -921,7 +936,18 @@ def archive_extras():
     record = export.firearms_html(store.items(), (store.get_raw("plan_info", {}) or {}).get("household_name") or "Household")
     if record:
         out["Firearms record.html"] = record
+    out["Kids plan.html"] = kids_plan()
+    out.update(recovery.archive_files(store, household_name()))  # home inventory with serials, receipts; money sheet
     return out
+
+
+def household_name(default="Household"):
+    return (store.get_raw("plan_info", {}) or {}).get("household_name") or default
+
+
+def kids_plan():
+    return recovery.kids_html(store._rows("SELECT * FROM contacts ORDER BY out_of_area DESC, name"), store.sites(),
+                              household_name("Our family"))
 
 
 def family_plan():
@@ -945,7 +971,8 @@ def family_view(st=None, admin=True):
         t["due"] = family.next_due(t).isoformat()
     return {"people": people, "contacts": store._rows("SELECT * FROM contacts ORDER BY out_of_area DESC, name"),
             "tasks": tasks, "calendar": family.calendar(tasks, st["analysis"]["expiring"] + st["analysis"]["expired"], node_reminders(),
-                                                        renewals=renewals.calendar_entries(store) if admin else ()),
+                                                        renewals=(renewals.calendar_entries(store) if admin else [])
+                                                        + comms.licence_calendar(store) + comms.calendar_entries(store)),
             "plan_info": store.get_raw("plan_info", {}) or {}, "phone_checks": family.PHONE_CHECKS}
 
 
@@ -1111,6 +1138,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._mcp(method, url)
             if url.path == "/field/checkin" and method == "POST":
                 return self._field_checkin()
+            if url.path.startswith("/api/partner/"):  # a partner hub reading its share: its own token, no login
+                return self._partner_feed(method, url.path[len("/api/partner/"):])
             self._guard(method != "GET")
             if url.path == "/api/login" and method == "POST":
                 return self._login()
@@ -1161,7 +1190,7 @@ class Handler(BaseHTTPRequestHandler):
                     and "/passkeys" not in url.path:
                 self._extra += [("X-Bunkr-Keep", "1"), ("X-Bunkr-Drop", ",".join(sorted(gaps.SENSITIVE)))]
             if isinstance(result, tuple):
-                self._send(200, result[0].encode(), result[1])
+                self._send(200, result[0] if isinstance(result[0], bytes) else result[0].encode(), result[1])
             else:
                 self._send(200, result)
         except ApiError as exc:
@@ -1397,7 +1426,11 @@ class Handler(BaseHTTPRequestHandler):
                 except ValueError as exc:
                     raise ApiError(400, str(exc))
                 audit.record(store, self.user, "change", "news", f"flagged a source: {str(d.get('url'))[:120]}", self._client_ip())
-                return {"ok": True, "reviewed": self.user["role"] == "admin"}
+                now_in = store._rows("SELECT s.id, s.headline FROM news_items i JOIN news_stories s ON s.id = i.story WHERE i.url=?",
+                                     (str(d.get("url") or ""),)) if d.get("kind") == "feed" else []
+                left = store._rows("SELECT headline FROM news_stories WHERE id=?", (str(d.get("story") or ""),)) if d.get("kind") == "feed" else []
+                return {"ok": True, "reviewed": self.user["role"] == "admin",
+                        "moved_to": now_in[0]["headline"] if now_in else "", "story_now": left[0]["headline"] if left else ""}
             if self.user["role"] != "admin":
                 raise ApiError(403, "only an admin can review flags")
             if method == "GET" and fid is None:
@@ -1600,6 +1633,71 @@ class Handler(BaseHTTPRequestHandler):
                 problems.append(f"line {n}: {exc}")
         return {"added": len(added), "ids": added, "problems": problems}
 
+    def _recovery(self, method, parts, query):
+        """Home inventory for insurance. Everyone sees it; adults change it; serial numbers and receipts are admin-only."""
+        admin = self.user["role"] == "admin"
+        sub = parts[1] if len(parts) > 1 else ""
+        rid = _num(parts[2], int, None) if len(parts) > 2 else None
+        if method == "GET" and not sub:
+            return recovery.view(store, admin)
+        if method == "GET" and sub == "files" and rid:
+            f = recovery.file_row(store, rid)
+            if not f or (f["kind"] == "receipt" and not admin):
+                raise ApiError(403 if f else 404, "only an admin can see receipts" if f else "not found")
+            p = recovery.file_path(store, f)
+            if not p.is_file():
+                raise ApiError(404, "the file is missing")
+            return p.read_bytes(), f["ctype"]
+        if method == "GET":
+            raise ApiError(404, "not found")
+        if not admin and not checkins.can_call(store, self.user):
+            raise ApiError(403, "only an adult can change the home inventory")
+        if ROLE in ("pi", "laptop"):
+            raise ApiError(400, "the home inventory is kept on the home hub only")
+        try:
+            if sub == "rooms":
+                if method == "DELETE" and rid:
+                    recovery.delete_room(store, rid)
+                    return {"ok": True}
+                return {"id": recovery.save_room(store, self._body(), rid)}
+            if sub == "items" and rid and parts[3:4] == ["files"] and method == "POST":
+                kind = query.get("kind", ["photo"])[0]
+                if kind == "receipt" and not admin:
+                    raise ApiError(403, "only an admin can add receipts")
+                data = self._read_raw(recovery.MAX_FILE)
+                return {"id": recovery.add_file(store, rid, kind, query.get("name", [""])[0], data)}
+            if sub == "items":
+                if method == "DELETE" and rid:
+                    recovery.delete_item(store, rid)
+                    return {"ok": True}
+                return {"id": recovery.save_item(store, self._body(), admin, rid)}
+            if sub == "files" and rid and method == "DELETE":
+                f = recovery.file_row(store, rid)
+                if f and f["kind"] == "receipt" and not admin:
+                    raise ApiError(403, "only an admin can remove receipts")
+                recovery.delete_file(store, rid)
+                return {"ok": True}
+        except LookupError as exc:
+            raise ApiError(404, str(exc))
+        raise ApiError(404, "not found")
+
+    def _finance(self, method, parts):
+        """The financial access sheet. "finance" is in ADMIN_HEADS, so only admins get here."""
+        rid = _num(parts[1], int, None) if len(parts) > 1 else None
+        if method == "GET" and not rid:
+            return {"accounts": recovery.finance(store), "kinds": recovery.FINANCE_KINDS}
+        if ROLE in ("pi", "laptop"):
+            raise ApiError(400, "the financial sheet is kept on the home hub only")
+        try:
+            if method == "DELETE" and rid:
+                recovery.delete_finance(store, rid)
+                return {"ok": True}
+            if method == "POST":
+                return {"id": recovery.save_finance(store, self._body(), rid)}
+        except LookupError as exc:
+            raise ApiError(404, str(exc))
+        raise ApiError(404, "not found")
+
     def _power(self, method, row_id, parts):
         sub = parts[1] if len(parts) > 1 else ""
         if method == "GET":
@@ -1634,6 +1732,127 @@ class Handler(BaseHTTPRequestHandler):
             store._exec(f"UPDATE power_devices SET {', '.join(f'{k}=?' for k in rec)} WHERE id=?", (*rec.values(), dev_id))
             return {"id": dev_id}
         return {"id": store._exec(f"INSERT INTO power_devices({', '.join(rec)}) VALUES({', '.join('?' for _ in rec)})", tuple(rec.values()))}
+
+    def _partner_feed(self, method, sub):
+        """A partner hub reads the share it was given. Its own bearer token; no session, nothing else reachable."""
+        ip = self._client_ip()
+        try:
+            if method != "GET":
+                raise ApiError(405, "read only")
+            share, err = partners.check(store, sub.strip("/"), self._bearer(), ip)
+            if err:
+                if err[0] != 429:
+                    audit.record(store, None, "denied", "partner share", f"GET /api/partner/{sub[:40]}: {err[1]}", ip)
+                raise ApiError(*err)
+            audit.record(store, {"id": None, "username": f"partner:{share['name']}"[:60]}, "view", "partner share",
+                         f"{share['name']}: {', '.join(json.loads(share['parts'] or '[]'))}", ip)
+            return self._send(200, partners.payload(store, share))
+        except ApiError as exc:
+            self._send(exc.status, {"error": str(exc)})
+        except Exception as exc:
+            self._send(500, {"error": f"{type(exc).__name__}"})
+
+    def _comms(self, method, head, row_id, parts, query):
+        """The Comms tab. Everyone reads it; adults and admins change neighbors, nets and messages; a person may change
+        their own licenses; anyone logged in may log a net check-in. Partner hubs are set up by admins."""
+        user, admin = self.user, self.user["role"] == "admin"
+        adult = admin or checkins.can_call(store, user)
+        sub = parts[2] if len(parts) > 2 else ""
+        folder = Path(store.path).parent
+        data = self._body() if method == "POST" else {}
+        if method == "GET" and head == "comms":
+            me = checkins.person_for_user(store, user)
+            return comms.view(store) | {"can_edit": adult, "me": me["id"] if me else None, "hub": ROLE not in ("pi", "laptop")}
+        if method == "GET" and head == "ics213" and row_id and sub == "print.html":
+            m = store._rows("SELECT * FROM ics213 WHERE id=?", (row_id,))
+            if not m:
+                raise ApiError(404, "no such message")
+            return comms.ics213_html(m[0]), "text/html; charset=utf-8"
+        if head in ("licences", "neighbours", "nets") and method != "GET" and ROLE in ("pi", "laptop"):
+            raise ApiError(400, "Change this on the hub: it copies here at the next sync.")
+        try:
+            if head == "licences":
+                found = store._rows("SELECT * FROM licences WHERE id=?", (row_id,)) if row_id else []
+                if row_id and not found:
+                    raise ApiError(404, "no such license")
+                person_id = found[0]["person_id"] if found else _num(data.get("person_id"), int, 0)
+                if not med_editor(user, person_id):
+                    raise ApiError(403, "only an adult or the person themselves can change this")
+                if method == "POST" and found and sub == "renewed":
+                    comms.mark_renewed(store, row_id)
+                    return {"ok": True}
+                if method == "POST" and not sub:
+                    return {"id": comms.save_licence(store, person_id, data, row_id)}
+                if method == "DELETE" and found:
+                    store._exec("DELETE FROM licences WHERE id=?", (row_id,))
+                    return {"ok": True}
+            elif head == "net-log":
+                if method == "POST" and not row_id:
+                    return {"id": comms.log_checkin(store, data, user.get("username") or "")}
+                if method == "DELETE" and row_id:
+                    if not adult:
+                        raise ApiError(403, "only an adult can remove log entries")
+                    store._exec("DELETE FROM net_log WHERE id=?", (row_id,))
+                    return {"ok": True}
+            elif head in ("neighbours", "nets", "ics213"):
+                if method == "GET":
+                    raise ApiError(404, "not found")
+                if not adult:
+                    raise ApiError(403, "only an adult can change this")
+                table = {"neighbours": "neighbours", "nets": "nets", "ics213": "ics213"}[head]
+                if method == "POST" and not sub:
+                    if head == "ics213":
+                        return {"id": comms.save_ics213(store, data, user.get("username") or "", row_id)}
+                    return {"id": (comms.save_neighbour if head == "neighbours" else comms.save_net)(store, data, row_id)}
+                if method == "DELETE" and row_id:
+                    if not store._rows(f"SELECT id FROM {table} WHERE id=?", (row_id,)):
+                        raise ApiError(404, "not found")
+                    store._exec(f"DELETE FROM {table} WHERE id=?", (row_id,))
+                    return {"ok": True}
+            elif head == "partners":
+                if method == "GET":
+                    return partners.view(store, folder, admin=admin)
+                if not admin:
+                    raise ApiError(403, "only an admin can do that")
+                self._audit_what = "partner hub"
+                if method == "POST" and parts[1:] == ["pull"]:
+                    partners.pull_all(store, folder)
+                    return partners.view(store, folder, admin=True)
+                if method == "POST" and row_id and sub == "pull":
+                    p = store._rows("SELECT * FROM partners WHERE id=?", (row_id,))
+                    if not p:
+                        raise ApiError(404, "no such partner")
+                    partners.pull(store, folder, p[0])
+                    return partners.view(store, folder, admin=True)
+                if method == "POST" and not row_id and len(parts) == 1:
+                    pid = partners.add_partner(store, folder, data)
+                    p = store._rows("SELECT * FROM partners WHERE id=?", (pid,))[0]
+                    threading.Thread(target=partners.pull, args=(store, folder, p), daemon=True).start()
+                    return {"id": pid}
+                if method == "POST" and row_id and not sub:
+                    partners.update_partner(store, folder, row_id, data)
+                    return {"id": row_id}
+                if method == "DELETE" and row_id:
+                    partners.remove_partner(store, folder, row_id)
+                    return {"ok": True}
+            elif head == "partner-shares":  # admins only (ADMIN_HEADS)
+                self._audit_what = "partner share"
+                if method == "GET":
+                    return {"shares": partners.shares(store), "parts": partners.PARTS, "base": self._base() + "/api/partner/"}
+                if method == "POST" and not row_id:
+                    _id, uid, token = partners.create_share(store, data.get("name"), data.get("parts"), user.get("username") or "")
+                    return {"id": _id, "url": f"{self._base()}/api/partner/{uid}", "token": token}
+                if method == "POST" and row_id and not sub:
+                    partners.update_share(store, row_id, data)
+                    return {"ok": True}
+                if method == "DELETE" and row_id:
+                    partners.revoke_share(store, row_id)
+                    return {"ok": True}
+        except ValueError as exc:
+            raise ApiError(400, str(exc))
+        except LookupError as exc:
+            raise ApiError(404, str(exc))
+        raise ApiError(404, "not found")
 
     def _meds(self, method, row_id, parts):
         sub = parts[2] if len(parts) > 2 else ""
@@ -1687,7 +1906,7 @@ class Handler(BaseHTTPRequestHandler):
         ctype = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
         self._send(200, target.read_bytes(), ctype)
 
-    # ---------------- Claude connector (MCP) ----------------
+    # ---------------- optional AI connector (MCP); off until an admin turns it on ----------------
     def _base(self):
         if PUBLIC_URL:
             return PUBLIC_URL.rstrip("/")
@@ -1718,6 +1937,8 @@ class Handler(BaseHTTPRequestHandler):
         base, p = self._base(), url.path
         js = lambda obj, status=200, headers=(): self._raw(status, json.dumps(obj).encode(), "application/json", headers)
         q = {k: v[0] for k, v in parse_qs(url.query).items()}
+        if not aimod.connector_on(store):
+            return js({"error": "not found"}, 404)
         if p.startswith("/.well-known/"):
             if method != "GET":
                 return self._raw(405, headers=[("Allow", "GET")])
@@ -1726,10 +1947,10 @@ class Handler(BaseHTTPRequestHandler):
             if p.startswith(("/.well-known/oauth-authorization-server", "/.well-known/openid-configuration")):
                 return js(mcp.auth_server(base))
             return js({"error": "not found"}, 404)
-        claude_ok = mcp.from_claude(self.headers.get("CF-Connecting-IP"))
+        client_ok = mcp.from_assistant(self.headers.get("CF-Connecting-IP"))
         try:
             if p == "/mcp/oauth/register" and method == "POST":
-                if not claude_ok:
+                if not client_ok:
                     return js({"error": "access_denied"}, 403)
                 try:
                     body = json.loads(self._read_raw() or b"{}")
@@ -1737,7 +1958,7 @@ class Handler(BaseHTTPRequestHandler):
                     raise mcp.OAuthError("invalid_client_metadata", "send JSON")
                 return js(mcp.register(store, body if isinstance(body, dict) else {}), 201)
             if p == "/mcp/oauth/token" and method == "POST":
-                if not claude_ok:
+                if not client_ok:
                     return js({"error": "access_denied"}, 403)
                 return js(mcp.token(store, mcp.parse_form(self._read_raw(), self.headers.get("Content-Type"))))
             if p == "/mcp/oauth/authorize":
@@ -1754,18 +1975,18 @@ class Handler(BaseHTTPRequestHandler):
                     return self._raw(400, page.encode(), "text/html; charset=utf-8")
                 if method == "GET":
                     return self._raw(200, mcp.authorize_page(form, c).encode(), "text/html; charset=utf-8",
-                                     [("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self' https://claude.ai https://claude.com")])
+                                     [("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self' " + " ".join(sorted(mcp.ALLOWED_ORIGINS)))])
                 try:
                     u = auth.check_password(store, form.get("username", ""), form.get("password", ""))
                     if mfa.enabled(store, u["id"]):
                         if not mfa.status(store, u["id"])["totp"]:
                             raise auth.AuthError("this login uses passkeys only: add authenticator codes on the Household tab "
-                                                 "to connect Claude")
+                                                 "to connect an AI assistant")
                         if not mfa.verify_code(store, u["id"], form.get("code")):
                             auth.note_failure(store, u)
                             raise auth.AuthError("add the code from your authenticator app" if not form.get("code") else "that code doesn't match")
                     user = {"id": u["id"], "username": u["username"]}
-                    audit.record(store, user, "login", "claude", "connector sign-in", self._client_ip())
+                    audit.record(store, user, "login", "connector", "connector sign-in", self._client_ip())
                 except auth.AuthError as exc:
                     return self._raw(200, mcp.authorize_page(form, c, str(exc)).encode(), "text/html; charset=utf-8")
                 return self._redirect(mcp.issue_code(store, c, ru, user["id"], form))
@@ -1773,7 +1994,7 @@ class Handler(BaseHTTPRequestHandler):
                 if method != "POST":
                     return self._raw(405, headers=[("Allow", "POST")])
                 origin = self.headers.get("Origin")
-                if (origin and origin.rstrip("/") not in ("https://claude.ai", "https://claude.com", base)) or not claude_ok:
+                if (origin and origin.rstrip("/") not in (mcp.ALLOWED_ORIGINS | {base})) or not client_ok:
                     return js({"error": "forbidden"}, 403)
                 user = mcp.bearer_user(store, self.headers.get("Authorization"))
                 if not user:
@@ -1786,7 +2007,7 @@ class Handler(BaseHTTPRequestHandler):
                 tools = mcp_tools.make_tools(sys.modules[__name__])
 
                 def run(name, args, u):
-                    audit.record(store, u, "connector", "claude", name, self._client_ip())
+                    audit.record(store, u, "connector", "connector", name, self._client_ip())
                     try:
                         return tools[name]["fn"](args, u)
                     except mcp.ToolError:
@@ -1863,7 +2084,7 @@ class Handler(BaseHTTPRequestHandler):
                                          since, source=node["name"])
                 checkins.apply(store, {k: data.get(k, []) for k in ("checkins", "calls")})
                 changes = (sync.export_records(store, since) | checkins.export(store, since, include_people=True)
-                           | situation.export(store, since) | brief.export(store, since))
+                           | situation.export(store, since) | brief.export(store, since) | comms.export(store))
                 return self._send(200, {"changes": changes, "cursor": cursor,
                                         "applied": res["applied"], "conflicts": res["conflicts"]})
             raise ApiError(404, "unknown sync endpoint")
@@ -2026,6 +2247,25 @@ class Handler(BaseHTTPRequestHandler):
             if method == "DELETE" and row_id:
                 store.delete_item(row_id)
                 return {"ok": True}
+        if head == "label":
+            if method == "GET":
+                return {"ready": labelread.ready()}
+            if method == "POST":
+                try:
+                    return labelread.read(self._read_raw(labelread.MAX_BYTES + 1))
+                except ValueError as exc:
+                    raise ApiError(400, str(exc))
+                except RuntimeError as exc:
+                    raise ApiError(503, str(exc))
+        if head == "foodsources":
+            folder = Path(store.path).parent
+            if method == "GET":
+                return foodsources.view(store, folder) | {"label_reader": labelread.ready()}
+            if method == "POST":
+                try:
+                    return foodsources.save_settings(store, folder, self._body()) | {"label_reader": labelread.ready()}
+                except ValueError as exc:
+                    raise ApiError(400, str(exc))
         if head == "barcode" and method == "POST":
             try:
                 r = quickadd.lookup(store, self._body().get("code"))
@@ -2256,15 +2496,21 @@ class Handler(BaseHTTPRequestHandler):
                 store._exec("DELETE FROM channels WHERE id=?", (row_id,))
                 return {"ok": True}
 
+        if head in COMMS_HEADS:
+            return self._comms(method, head, row_id, parts, query)
         if head == "family" and method == "GET":
             return family_view(full_state(self.user), admin=self.user["role"] == "admin")
         if head == "situation":
             sub_ = parts[1] if len(parts) > 1 else ""
             if method == "GET" and sub_ == "geo":
-                return situation.geo(store, store.sites())
+                geo = situation.geo(store, store.sites())
+                geo["features"] += comms.neighbour_features(store)
+                return geo
             if method == "GET":
                 maps_dir = depot.root / "maps"
-                return situation.view(store) | {"map": {
+                return situation.view(store) | {"neighbours": [
+                    {k: n[k] for k in ("id", "name", "lat", "lon", "place", "skill_labels")}
+                    for n in comms.neighbours(store) if n["lat"] is not None]} | {"map": {
                     "viewer": (depot.root / "web" / "maps" / "maplibre-gl.js").exists(),
                     "pack": maps_dir.is_dir() and any(maps_dir.glob("*.pmtiles"))}}
             if self.user["role"] != "admin":
@@ -2297,7 +2543,7 @@ class Handler(BaseHTTPRequestHandler):
             sub_ = parts[1] if len(parts) > 1 else ""
             if method == "GET":
                 rec = brief.latest(store, query.get("day", [None])[0])
-                return {"brief": rec, "days": brief.days(store), "settings": {k: BRIEF[k] for k in ("enabled", "time", "tz", "ai")},
+                return {"brief": rec, "days": brief.days(store), "settings": {k: BRIEF[k] for k in ("enabled", "time", "tz")} | {"ai": BRIEF["ai"] and aimod.summaries_on(store)},
                         "running": _brief_lock.locked()}
             if (method, sub_) == ("POST", "run"):
                 if self.user["role"] != "admin":
@@ -2366,6 +2612,50 @@ class Handler(BaseHTTPRequestHandler):
             if method == "POST" and parts[1:] == ["settings"]:
                 try:
                     return selfupdate.save_settings(store, self._body())
+                except ValueError as exc:
+                    raise ApiError(400, str(exc))
+        if head == "ai":
+            if method == "GET":
+                return aimod.view(store)
+            if method == "POST" and parts[1:] == ["test"]:
+                try:
+                    text = aimod.reply(store, "Reply with the single word: ready", timeout=120)
+                except Exception as exc:
+                    raise ApiError(400, str(exc)[:200])
+                return {"ok": True, "reply": text.strip()[:80]}
+            if method == "POST" and not parts[1:]:
+                try:
+                    return aimod.save_settings(store, self._body())
+                except ValueError as exc:
+                    raise ApiError(400, str(exc))
+        if head == "naming":
+            if method == "GET":
+                return naming.view(store)
+            if method == "POST" and parts[1:] == ["preview"]:
+                try:
+                    return naming.preview(self._body())
+                except ValueError as exc:
+                    raise ApiError(400, str(exc))
+            if method == "POST" and not parts[1:]:
+                try:
+                    return naming.save_settings(store, self._body())
+                except ValueError as exc:
+                    raise ApiError(400, str(exc))
+        if head == "kroger":
+            folder = Path(store.path).parent
+            if method == "GET":
+                return kroger.view(store, folder)
+            if method == "POST" and parts[1:] == ["test"]:
+                if not kroger.ready(store, folder):
+                    raise ApiError(400, "save the client id and secret first")
+                try:
+                    found = kroger.lookup(store, "0001111041700")  # a Kroger-brand gallon of milk: just to prove the key works
+                except Exception as exc:
+                    raise ApiError(502, str(exc) if isinstance(exc, RuntimeError) else f"couldn't reach Kroger ({type(exc).__name__})")
+                return kroger.view(store, folder) | {"tested": True, "found": bool(found)}
+            if method == "POST" and len(parts) == 1:
+                try:
+                    return kroger.save_settings(store, folder, self._body())
                 except ValueError as exc:
                     raise ApiError(400, str(exc))
         if head == "localwatch":
@@ -2803,6 +3093,25 @@ class Handler(BaseHTTPRequestHandler):
         if (method, head) == ("GET", "audit.csv"):
             return export_audit_csv(), "text/csv; charset=utf-8"
 
+        if head == "recovery":
+            return self._recovery(method, parts, query)
+        if head == "finance":
+            return self._finance(method, parts)
+        if (method, head) == ("GET", "finance-sheet.html"):
+            return recovery.finance_html(recovery.finance(store), household_name()), "text/html; charset=utf-8"
+        if (method, head) == ("GET", "insurance-list.html"):
+            admin = self.user["role"] == "admin"
+            return recovery.insurance_html(recovery.items(store, admin), admin, household_name()), "text/html; charset=utf-8"
+        if (method, head) == ("GET", "insurance-list.csv"):
+            admin = self.user["role"] == "admin"
+            self._extra.append(("Content-Disposition", 'attachment; filename="home-inventory.csv"'))
+            return recovery.insurance_csv(recovery.items(store, admin), admin), "text/csv; charset=utf-8"
+        if (method, head) in (("GET", "meal-plan"), ("GET", "meal-plan.html")):
+            mp = recovery.meal_plan(store.settings(), gaps.visible(store.items(), "family"),
+                                    _num(query.get("days", ["7"])[0], int, 7))
+            return (recovery.meal_html(mp, household_name()), "text/html; charset=utf-8") if head.endswith(".html") else mp
+        if (method, head) == ("GET", "kids-plan.html"):
+            return kids_plan(), "text/html; charset=utf-8"
         if (method, head) == ("GET", "export.csv"):
             return export.inventory_csv(gaps.visible(store.items(), self.user["role"])), "text/csv; charset=utf-8"
         if (method, head) == ("GET", "report.html"):
@@ -2922,7 +3231,7 @@ def setup_notifier():
 
     notifier = notify.Notifier(store, folder / "vapid.pem", enabled, mail=mail)
     for listeners in (checkins.listeners, situation.listeners, medical.listeners, audit.listeners, flights.listeners,
-                      renewals.listeners, news.listeners, localwatch.listeners, selfupdate.listeners):
+                      renewals.listeners, comms.listeners, news.listeners, localwatch.listeners, selfupdate.listeners):
         if notifier not in listeners:
             listeners[:] = [l for l in listeners if not isinstance(l, notify.Notifier)] + [notifier]  # others (mesh) stay
 
@@ -2954,7 +3263,7 @@ _news_lock = threading.Lock()
 
 
 def refresh_news(keys=None):
-    """Fetch headlines, file them into stories, tag new ones (with Claude when the brief uses it). Hourly on the hub,
+    """Fetch headlines, file them into stories, tag new ones (with AI when AI summaries are on). Hourly on the hub,
     and the breaking-news and specialist feeds (brief.FAST) every 10 minutes."""
     if not _news_lock.acquire(blocking=False):
         return None
@@ -2965,8 +3274,7 @@ def refresh_news(keys=None):
             local, st = localwatch.fetch_places(places)
             heads += local
             store.set_raw("localwatch_news", st)
-        ai = (lambda p: brief.run_claude(p, env_file=BRIEF["env_file"] or None, home=str(Path(store.path).parent / "claude-home"),
-                                         claude=BRIEF["claude"], timeout=300)) if BRIEF["ai"] and BRIEF["enabled"] else None
+        ai = aimod.summarizer(store, timeout=300) if BRIEF["ai"] and BRIEF["enabled"] else None
         return news.refresh(store, heads, ai=ai, places=places)
     finally:
         _news_lock.release()
@@ -2982,9 +3290,8 @@ def make_brief(force=False, now_=None):
     if not _brief_lock.acquire(blocking=False):
         return None
     try:
-        ai = (lambda p: brief.run_claude(p, env_file=BRIEF["env_file"] or None,
-                                         home=str(Path(store.path).parent / "claude-home"), claude=BRIEF["claude"])) if BRIEF["ai"] else None
-        rec = brief.build(store, situation.items(store), use_ai=BRIEF["ai"], ai=ai)
+        ai = aimod.summarizer(store) if BRIEF["ai"] else None
+        rec = brief.build(store, situation.items(store), use_ai=bool(ai), ai=ai)
         brief.save(store, rec, day)
         for fn in list(situation.listeners):
             if isinstance(fn, notify.Notifier):
@@ -3020,12 +3327,15 @@ def start_background():
     scheduler.every("updates", 3600, nightly_updates, at_hour=3)
     scheduler.every("maps", 3600, maps_refresh, at_hour=4)
     scheduler.every("chirp", 3600, chirp_nightly, at_hour=3)
+    if ROLE == "hub":
+        scheduler.every("os-packages", 7 * 86400, cache_packages, first_delay=600)
     scheduler.every("publish", 3600, publish_generated, first_delay=30)
     if not LOCK["on"]:  # a locked node's database lives only in its vault; no plain copies
         scheduler.every("db-backup", 3600, lambda: dbcheck.nightly(store), at_hour=2)
     scheduler.every("audit", 3600, lambda: audit.nightly(store), at_hour=2)
     scheduler.every("medical", 3600, lambda: medical.remind(store), at_hour=8)
     scheduler.every("renewals", 3600, lambda: renewals.remind(store), at_hour=8)
+    scheduler.every("licences", 3600, lambda: comms.remind(store), at_hour=8)
     scheduler.every("mail", 300, lambda: mailer.flush(store, Path(store.path).parent), first_delay=60)
     if KIWIX["manager"]:
         scheduler.every("kiwix", 60, kiwix_watch, first_delay=5)
@@ -3036,6 +3346,7 @@ def start_background():
         scheduler.every("news-fast", 600, lambda: refresh_news(brief.FAST), first_delay=400)
         scheduler.every("chatter", 600, lambda: localwatch.run(store, Path(store.path).parent), first_delay=460)
         scheduler.every("flights", flights.CHECK_EVERY, check_flights, first_delay=20)
+        scheduler.every("partners", partners.PULL_EVERY, lambda: partners.pull_all(store, Path(store.path).parent), first_delay=120)
         scheduler.every("bunkr-version", 24 * 3600, lambda: selfupdate.check(store), first_delay=600)
     scheduler.start()
 
@@ -3056,12 +3367,14 @@ def main():
     ap.add_argument("--brief-time", default="06:30", metavar="HH:MM", help="when the morning brief is made (local time, --brief-tz)")
     ap.add_argument("--brief-tz", default="America/Denver", help="time zone for the brief")
     ap.add_argument("--no-brief", action="store_true", help="don't make a morning brief")
-    ap.add_argument("--no-brief-ai", action="store_true", help="headlines only, no AI summary")
-    ap.add_argument("--brief-env-file", default="", metavar="FILE",
-                    help="file with CLAUDE_CODE_OAUTH_TOKEN=... for the AI summary (default: claude.env next to the database)")
-    ap.add_argument("--claude", default="claude", metavar="PATH", help="the claude command")
+    ap.add_argument("--no-brief-ai", action="store_true", help="never use AI, even when it's turned on in the app")
+    ap.add_argument("--ai-env-file", "--brief-env-file", dest="ai_env_file", default="", metavar="FILE",
+                    help="optional AI: login file for the command-line AI tool (default: ai.env or claude.env next to the database)")
+    ap.add_argument("--ai-cli", default="", metavar="COMMAND",
+                    help="optional AI: a command that reads a prompt on stdin and prints the reply (default: Claude Code, tools off)")
+    ap.add_argument("--claude", default="", help=argparse.SUPPRESS)   # older name for --ai-cli's program
     ap.add_argument("--public-url", default="", metavar="URL",
-                    help="public address of this BUNKR for the Claude connector, e.g. https://bunkr.example.org")
+                    help="public address of this BUNKR for the optional AI connector, e.g. https://bunkr.example.org")
     ap.add_argument("--open-net", action="append", default=[], metavar="CIDR",
                     help="clients on this network get the read-only field page without a login, e.g. the "
                          "Pi's hotspot 10.42.0.0/24 (repeatable; the Wi-Fi password is the gate)")
@@ -3079,9 +3392,10 @@ def main():
     OPEN_NETS[:] = [ipaddress.ip_network(n, strict=False) for n in args.open_net]
     global PUBLIC_URL
     PUBLIC_URL = args.public_url.strip()
-    BRIEF.update(enabled=not args.no_brief, ai=not args.no_brief_ai, tz=args.brief_tz, claude=args.claude,
-                 time=args.brief_time if re.fullmatch(r"\d\d:\d\d", args.brief_time) else "06:30",
-                 env_file=args.brief_env_file or str(Path(args.db).parent / "claude.env"))
+    BRIEF.update(enabled=not args.no_brief, ai=not args.no_brief_ai, tz=args.brief_tz,
+                 time=args.brief_time if re.fullmatch(r"\d\d:\d\d", args.brief_time) else "06:30")
+    aimod.CLI.update(env_file=args.ai_env_file,
+                     command=args.ai_cli or (aimod.DEFAULT_CLI.replace("claude", shlex.quote(args.claude), 1) if args.claude else aimod.DEFAULT_CLI))
     if args.bind not in ("127.0.0.1", "localhost", "::1") and not args.require_login:
         print("WARNING: listening beyond this computer without --require-login; firewall the port.")
     global depot

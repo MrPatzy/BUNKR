@@ -4,7 +4,7 @@ Recorded:
 - logins (worked, failed, locked out), anything someone was refused (not allowed for their login), log-outs and every change to logins (new, deleted, role, password);
 - every change anyone makes through BUNKR (method and path only, never what was typed, so no passwords end up here);
 - looking at sensitive things: the inventory with firearms (admins), documents, medical details and cards, people's
-  details, the family plan, printouts and exports, the log itself, and what the Claude connector reads.
+  details, the family plan, printouts and exports, the log itself, and what the optional AI connector reads.
 
 A view is written at most once an hour per person and thing, so opening the app twenty times isn't twenty rows.
 Each row stores a hash of the row before it, so an edited or deleted row breaks the chain and `verify` says where.
@@ -29,7 +29,9 @@ _lock = threading.Lock()
 # GET routes worth a "view" row: head -> what
 VIEWS = {"documents": "documents", "medical": "medical", "medical-cards.html": "medical", "people": "people",
          "family-plan.html": "family plan", "report.html": "printout", "export.csv": "export", "users": "logins",
-         "audit": "audit log", "audit.csv": "export", "backups": "backups", "nodes": "nodes", "calendar.ics": "calendar"}
+         "audit": "audit log", "audit.csv": "export", "backups": "backups", "nodes": "nodes", "calendar.ics": "calendar",
+         "recovery": "home inventory", "insurance-list.html": "printout", "insurance-list.csv": "export",
+         "finance": "financial sheet", "finance-sheet.html": "printout", "kids-plan.html": "family plan"}
 ALERTS = {"locked": "A login was locked after failed attempts", "admin_added": "A new admin login was made",
           "made_admin": "A login was made admin", "user_deleted": "A login was deleted",
           "password_reset": "Someone's password was changed by an admin", "mfa_off": "Two-step login was turned off",

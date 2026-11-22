@@ -387,7 +387,7 @@ def _migrate_9(conn):
 
 
 def _migrate_10(conn):
-    """Claude connector (MCP): OAuth clients, codes and tokens, and a log of every change made through it."""
+    """Optional AI connector (MCP): OAuth clients, codes and tokens, and a log of every change made through it."""
     conn.executescript("""
     CREATE TABLE IF NOT EXISTS mcp_clients (
         client_id TEXT PRIMARY KEY,
@@ -933,9 +933,165 @@ def _migrate_32(conn):
     CREATE INDEX IF NOT EXISTS chatter_at ON chatter(at);
     """)
 
+
+def _migrate_33(conn):
+    """Community and comms: licences and skills per person, neighbours, radio nets and a check-in log, ICS-213 messages,
+    and partner hubs (a read-only share for a neighbour's BUNKR, and the partners this hub reads)."""
+    conn.executescript("""
+    CREATE TABLE IF NOT EXISTS licences (
+        id INTEGER PRIMARY KEY,
+        uid TEXT NOT NULL UNIQUE,
+        person_id INTEGER NOT NULL REFERENCES people(id) ON DELETE CASCADE,
+        kind TEXT NOT NULL,                    -- ham | gmrs | cpr | first_aid | cert | other
+        label TEXT NOT NULL DEFAULT '',        -- what it is, for "other" (Wilderness First Responder...)
+        class TEXT NOT NULL DEFAULT '',        -- ham: Technician | General | Extra
+        callsign TEXT NOT NULL DEFAULT '',
+        number TEXT NOT NULL DEFAULT '',       -- certificate or FRN number
+        expires TEXT NOT NULL DEFAULT '',      -- YYYY-MM-DD or empty
+        renewed_at TEXT NOT NULL DEFAULT '',   -- "done" on the maintenance list, until a new date is set
+        notes TEXT NOT NULL DEFAULT '',
+        updated_at TEXT NOT NULL DEFAULT ''
+    );
+    CREATE TABLE IF NOT EXISTS neighbours (
+        id INTEGER PRIMARY KEY,
+        uid TEXT NOT NULL UNIQUE,
+        name TEXT NOT NULL,
+        place TEXT NOT NULL DEFAULT '',        -- address or "two doors down"
+        lat REAL,
+        lon REAL,
+        phone TEXT NOT NULL DEFAULT '',
+        callsign TEXT NOT NULL DEFAULT '',
+        contact TEXT NOT NULL DEFAULT '',      -- email or anything else
+        skills TEXT NOT NULL DEFAULT '[]',     -- JSON list of pick-list ids
+        skills_other TEXT NOT NULL DEFAULT '',
+        notes TEXT NOT NULL DEFAULT '',
+        updated_at TEXT NOT NULL DEFAULT ''
+    );
+    CREATE TABLE IF NOT EXISTS nets (
+        id INTEGER PRIMARY KEY,
+        uid TEXT NOT NULL UNIQUE,
+        name TEXT NOT NULL,
+        freq TEXT NOT NULL DEFAULT '',         -- "146.520" or "GMRS 20" or a repeater name
+        mode TEXT NOT NULL DEFAULT 'FM',
+        weekday INTEGER NOT NULL DEFAULT -1,   -- 0 Monday .. 6 Sunday, -1 every day
+        time TEXT NOT NULL DEFAULT '',         -- HH:MM local
+        net_control TEXT NOT NULL DEFAULT '',
+        notes TEXT NOT NULL DEFAULT '',
+        active INTEGER NOT NULL DEFAULT 1,
+        updated_at TEXT NOT NULL DEFAULT ''
+    );
+    CREATE TABLE IF NOT EXISTS net_log (
+        id INTEGER PRIMARY KEY,
+        net_id INTEGER REFERENCES nets(id) ON DELETE SET NULL,
+        net_name TEXT NOT NULL DEFAULT '',     -- kept when the net is removed
+        at TEXT NOT NULL,
+        who TEXT NOT NULL,
+        signal TEXT NOT NULL DEFAULT '',       -- 59, "5 by 9", "weak"
+        notes TEXT NOT NULL DEFAULT '',
+        by_name TEXT NOT NULL DEFAULT ''
+    );
+    CREATE INDEX IF NOT EXISTS net_log_at ON net_log(at);
+    CREATE TABLE IF NOT EXISTS ics213 (
+        id INTEGER PRIMARY KEY,
+        uid TEXT NOT NULL UNIQUE,
+        direction TEXT NOT NULL DEFAULT 'sent', -- sent | received
+        incident TEXT NOT NULL DEFAULT '',
+        to_name TEXT NOT NULL DEFAULT '',
+        to_position TEXT NOT NULL DEFAULT '',
+        from_name TEXT NOT NULL DEFAULT '',
+        from_position TEXT NOT NULL DEFAULT '',
+        subject TEXT NOT NULL DEFAULT '',
+        msg_date TEXT NOT NULL DEFAULT '',
+        msg_time TEXT NOT NULL DEFAULT '',
+        message TEXT NOT NULL DEFAULT '',
+        approved_name TEXT NOT NULL DEFAULT '',
+        approved_position TEXT NOT NULL DEFAULT '',
+        reply TEXT NOT NULL DEFAULT '',
+        reply_name TEXT NOT NULL DEFAULT '',
+        reply_position TEXT NOT NULL DEFAULT '',
+        reply_at TEXT NOT NULL DEFAULT '',
+        created_by TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS partner_shares (
+        id INTEGER PRIMARY KEY,
+        uid TEXT NOT NULL UNIQUE,              -- in the share's address; not a secret
+        name TEXT NOT NULL,
+        token_hash TEXT NOT NULL,              -- SHA-256 of the token; the token itself is shown once
+        parts TEXT NOT NULL DEFAULT '[]',      -- JSON: board | calls | comms | licences
+        created_by TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        revoked_at TEXT NOT NULL DEFAULT '',
+        last_used_at TEXT NOT NULL DEFAULT '',
+        uses INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE TABLE IF NOT EXISTS partners (
+        id INTEGER PRIMARY KEY,
+        name TEXT NOT NULL,
+        url TEXT NOT NULL,                     -- the share address; its token is in partner-<id>.token next to the DB
+        data TEXT NOT NULL DEFAULT '{}',       -- the last good answer, cleaned
+        as_of TEXT NOT NULL DEFAULT '',        -- when their hub made it
+        fetched_at TEXT NOT NULL DEFAULT '',
+        last_try TEXT NOT NULL DEFAULT '',
+        last_error TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL
+    );
+    """)
+
+
+def _migrate_34(conn):
+    """Recovery: a home inventory for insurance (rooms, items, photos and receipts kept as files next to the
+    database) and the admin-only financial access sheet. None of it is synced to nodes."""
+    conn.executescript("""
+    CREATE TABLE IF NOT EXISTS recovery_rooms (
+        id INTEGER PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE,
+        notes TEXT NOT NULL DEFAULT ''
+    );
+    CREATE TABLE IF NOT EXISTS recovery_items (
+        id INTEGER PRIMARY KEY,
+        room_id INTEGER REFERENCES recovery_rooms(id) ON DELETE SET NULL,
+        name TEXT NOT NULL,
+        category TEXT NOT NULL DEFAULT '',
+        make_model TEXT NOT NULL DEFAULT '',
+        serial TEXT NOT NULL DEFAULT '',        -- admin only, like firearm serials
+        purchased TEXT NOT NULL DEFAULT '',     -- YYYY-MM-DD
+        price_paid REAL,
+        replacement_value REAL,
+        notes TEXT NOT NULL DEFAULT '',
+        updated_at TEXT NOT NULL DEFAULT ''
+    );
+    CREATE INDEX IF NOT EXISTS recovery_items_room ON recovery_items(room_id);
+    CREATE TABLE IF NOT EXISTS recovery_files (
+        id INTEGER PRIMARY KEY,
+        item_id INTEGER NOT NULL REFERENCES recovery_items(id) ON DELETE CASCADE,
+        kind TEXT NOT NULL,                     -- photo | receipt (receipts are admin only)
+        name TEXT NOT NULL DEFAULT '',          -- the name it was uploaded with
+        file TEXT NOT NULL UNIQUE,              -- stored name in <db dir>/recovery-files/
+        ctype TEXT NOT NULL,
+        size INTEGER NOT NULL DEFAULT 0,
+        added_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS recovery_files_item ON recovery_files(item_id);
+    CREATE TABLE IF NOT EXISTS finance_accounts (
+        id INTEGER PRIMARY KEY,
+        institution TEXT NOT NULL,
+        kind TEXT NOT NULL DEFAULT 'other',     -- bank | credit_card | insurance | retirement | loan | utility | other
+        holder TEXT NOT NULL DEFAULT '',
+        last4 TEXT NOT NULL DEFAULT '',         -- never more than the last four digits
+        phone TEXT NOT NULL DEFAULT '',
+        website TEXT NOT NULL DEFAULT '',
+        notes TEXT NOT NULL DEFAULT '',         -- policy and claim notes
+        contact TEXT NOT NULL DEFAULT '',       -- who to call
+        paperwork TEXT NOT NULL DEFAULT '',     -- where the paperwork is
+        updated_at TEXT NOT NULL DEFAULT ''
+    );
+    """)
+
 MIGRATIONS = [_migrate_1, _migrate_2, _migrate_3, _migrate_4, _migrate_5, _migrate_6, _migrate_7, _migrate_8, _migrate_9,
               _migrate_10, _migrate_11, _migrate_12, _migrate_13, _migrate_14, _migrate_15, _migrate_16, _migrate_17, _migrate_18, _migrate_19, _migrate_20,
-              _migrate_21, _migrate_22, _migrate_23, _migrate_24, _migrate_25, _migrate_26, _migrate_27, _migrate_28, _migrate_29, _migrate_30, _migrate_31, _migrate_32]
+              _migrate_21, _migrate_22, _migrate_23, _migrate_24, _migrate_25, _migrate_26, _migrate_27, _migrate_28, _migrate_29, _migrate_30, _migrate_31, _migrate_32,
+              _migrate_33, _migrate_34]
 SCHEMA_VERSION = len(MIGRATIONS)
 
 ITEM_FIELDS = ("name", "category", "quantity", "unit", "pack_size", "pack_unit", "per_unit", "size_unit",

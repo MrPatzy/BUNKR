@@ -6,14 +6,17 @@ anything is saved. Nothing is guessed as a firearm: those stay a deliberate, adm
 Barcodes: BUNKR remembers each barcode it has seen (`barcodes` table: code -> product name and the item it was saved
 as), so scanning the same can again adds one to that item with no internet. An unknown code is looked up on Open
 Food Facts (free, open data; only the barcode number is sent, with a generic app name). For food it also gives
-calories per package, so scanned food counts toward "days of food" straight away.
+calories per package, so scanned food counts toward "days of food" straight away. Then Kroger's catalog (when set up),
+USDA FoodData Central and UPCitemdb (foodsources.py); USDA also fills in calories another source didn't have.
 """
 
 import json
 import re
+import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 
+from . import foodsources, kroger, naming
 from .gaps import GAL_PER
 
 USER_AGENT = "BUNKR/0.3 (self-hosted preparedness app)"
@@ -145,8 +148,15 @@ def from_off(product):
     except (TypeError, ValueError):
         qty_num = None
     unit = (product.get("product_quantity_unit") or "").lower()
+    qty_text = re.sub(r"\s*\(.*?\)", "", str(product.get("quantity") or "")).strip()
+    form = "Frozen" if "en:frozen" in tags else "Canned" if "en:canned" in tags else "Dried" if "en:dried" in tags else ""
+    store_at = "Frozen" if form == "Frozen" else "Cold" if re.search(r"en:(dairies|refrigerated|fresh|chilled)", tags) else "Dry"
+    parts = naming.parts((product.get("brands") or "").split(",")[0].strip(), product.get("product_name") or name,
+                         size=qty_text, storage=store_at, form=form)
     if "en:waters" in tags or re.search(r"\bwater\b", name, re.I) and not re.search(r"coconut|flavou?r", name, re.I):
-        draft = {"name": name[:120], "category": "water", "unit": "bottles", "per_unit": 0, "size_unit": ""}
+        parts["_form"] = parts["_form"] or "Bottled"
+        naming.restock(parts, store_at)
+        draft = {"name": name[:120], "category": "water", "unit": "bottles", "per_unit": 0, "size_unit": "", "parts": parts}
         if qty_num and unit in ("ml", ""):
             draft.update(per_unit=round(qty_num * GAL_PER["ml"], 4), size_unit="L" if qty_num >= 1000 else "ml")
         return draft
@@ -158,8 +168,18 @@ def from_off(product):
     except (TypeError, ValueError):
         per = 0
     cat = "food" if per or "en:foods" in tags or "en:plant-based-foods" in tags else guess_category(name)
-    return {"name": name[:120], "category": cat, "unit": "", "per_unit": per if cat == "food" else 0, "size_unit": "",
-            "note": f"{product.get('quantity')}" if product.get("quantity") else ""}
+    if cat not in ("food", "water"):
+        naming.restock(parts, "")
+    return {"name": name[:120], "category": cat, "unit": "cans" if parts["_form"] == "Canned" else "", "per_unit": per if cat == "food" else 0,
+            "size_unit": "", "parts": parts, "note": " · ".join(x for x in (parts["label"], product.get("quantity") or "") if x)[:120]}
+
+
+def _named(store, draft):
+    """Name a looked-up product in the household's style (naming.py); the store's own name stays in the note."""
+    parts = draft.pop("parts", None)
+    if parts:
+        draft["name"] = (naming.name(store, parts) or draft["name"])[:120]
+    return draft
 
 
 def lookup(store, code, get=_get, online=True):
@@ -174,9 +194,33 @@ def lookup(store, code, get=_get, online=True):
         return {"code": code, "source": "saved", "draft": {k: b[k] for k in ("name", "category", "per_unit", "size_unit", "unit")}}
     if not online:
         return {"code": code, "source": "none"}
+    error = ""
+    draft = None
     try:
         data = get(OFF_URL.format(code=code))
+        draft = from_off(data.get("product") or {}) if data.get("status") == 1 else None
+    except urllib.error.HTTPError as exc:
+        if exc.code != 404:  # Open Food Facts answers "not found" for products it doesn't have (store brands, often)
+            error = f"couldn't reach Open Food Facts ({type(exc).__name__})"
     except Exception as exc:
-        return {"code": code, "source": "none", "error": f"couldn't reach Open Food Facts ({type(exc).__name__})"}
-    draft = from_off(data.get("product") or {}) if data.get("status") == 1 else None
-    return {"code": code, "source": "openfoodfacts" if draft else "none", "draft": draft}
+        error = f"couldn't reach Open Food Facts ({type(exc).__name__})"
+    source = "openfoodfacts" if draft else ""
+    if not draft:
+        try:  # then Kroger's catalog, when an admin has set it up
+            draft = kroger.lookup(store, code)
+            source = "kroger" if draft else ""
+        except Exception:
+            error = error or "couldn't reach Kroger"
+    for name, fn in (("upcitemdb", foodsources.upcitemdb_lookup), ("usda", foodsources.usda_lookup)):  # the better name first
+        if draft:
+            break
+        try:
+            draft = fn(store, code, get=get)
+            source = name if draft else ""
+        except Exception:
+            error = error or f"couldn't reach {foodsources.SOURCES[name]}"
+    if draft:
+        if not draft.get("per_unit") and source != "usda":
+            foodsources.fill_calories(store, code, draft, get=get)
+        return {"code": code, "source": source, "draft": _named(store, draft)}
+    return {"code": code, "source": "none"} | ({"error": error} if error else {})

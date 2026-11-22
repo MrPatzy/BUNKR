@@ -1,4 +1,4 @@
-"""The tools Claude gets through the BUNKR connector. Narrow on purpose; see mcp.py.
+"""The tools an AI assistant gets through the optional BUNKR connector. Narrow on purpose; see mcp.py.
 
 Firearms (and their serial numbers) are never visible or editable here, whatever the user's role.
 Every change is written to mcp_log with enough to undo it.
@@ -88,7 +88,7 @@ def make_tools(srv):
     def check_item_fields(a):
         cat = a.get("category")
         if cat in gaps.SENSITIVE:
-            raise ToolError("firearms can only be added in BUNKR itself, not through Claude")
+            raise ToolError("firearms can only be added in BUNKR itself, not through the AI connector")
         if cat is not None and cat not in gaps.CATEGORIES:
             raise ToolError("category must be one of: " + ", ".join(k for k in gaps.CATEGORIES if k not in gaps.SENSITIVE))
         ess = a.get("counts_toward")
@@ -170,7 +170,7 @@ def make_tools(srv):
     def recent_changes(a, user):
         rows = store._rows("SELECT * FROM mcp_log ORDER BY id DESC LIMIT 20")
         return "\n".join(f"[{r['id']}] {r['at']} {r['username']} {r['tool']}: {r['result']}"
-                         + (" (undoable)" if r["undo"] else "") for r in rows) or "No changes made through Claude yet."
+                         + (" (undoable)" if r["undo"] else "") for r in rows) or "No changes made through the connector yet."
 
     # ---------------- writes ----------------
     def build_item(a):
@@ -435,7 +435,7 @@ def make_tools(srv):
                 raise ToolError("that location has items in it now; move them first (or remove it in BUNKR)")
             loc = store.location(lid)
             store.delete_location(lid)
-            msg = f"Removed location '{loc['name'] if loc else lid}' (added through Claude by change {a['change_id']})"
+            msg = f"Removed location '{loc['name'] if loc else lid}' (added through the connector by change {a['change_id']})"
         elif "delete_checkin" in u:
             store._exec("DELETE FROM checkins WHERE uid=?", (u["delete_checkin"],))
             msg = "Check-in removed"
@@ -483,7 +483,7 @@ def make_tools(srv):
          _obj(), maintenance_tasks, _ro("Maintenance tasks"))
     tool("channel_plan", "Radio channel plan", "The family radio plan: slot numbers, frequencies, tones. Optional search.",
          _obj({"query": {"type": "string"}}), channel_plan, _ro("Radio channel plan"))
-    tool("recent_changes", "Recent changes", "The last 20 changes made through Claude, with ids for undo_change.",
+    tool("recent_changes", "Recent changes", "The last 20 changes made through the connector, with ids for undo_change.",
          _obj(), recent_changes, _ro("Recent changes"))
     tool("add_item", "Add supply", "Add a supply to the inventory. Use packs for cases (quantity 1, pack_size 24).",
          _obj(item_props, ["name", "category", "quantity"]), add_item, _rw("Add supply"))
@@ -533,6 +533,6 @@ def make_tools(srv):
                "message": {"type": "string"}, "drill": {"type": "boolean", "description": "A practice run: marked DRILL, no night notifications"}},
               ["kind"]), send_family_call, _rw("Send a family call"))
     tool("end_family_call", "All clear", "End the active family call and tell everyone all clear.", _obj(), end_family_call, _rw("All clear", True))
-    tool("undo_change", "Undo a change", "Undo a change made through Claude (id from recent_changes). Removes an item only if Claude added it.",
+    tool("undo_change", "Undo a change", "Undo a change made through the connector (id from recent_changes). Removes an item only if it was added through the connector.",
          _obj({"change_id": {"type": "integer"}}, ["change_id"]), undo_change, _rw("Undo a change"))
     return T

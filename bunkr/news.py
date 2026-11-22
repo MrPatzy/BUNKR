@@ -5,8 +5,8 @@ they're about, and ranked for each person.
   headlines. A headline joins a recent story when it shares two or more key words with one of the story's
   headlines; otherwise it starts a new story. Story ids don't change once made, so who read or rated what holds.
 - Where a story is about ("area" and a place to pin on the map) comes from place names in its headlines and
-  summaries, matched against the list below, offline. Colorado outlets default to Colorado. When the hub's Claude
-  plan is set up, new stories covered by several outlets get a second opinion on area, place and topic (text in,
+  summaries, matched against the list below, offline. Colorado outlets default to Colorado. When optional AI
+  summaries are on (ai.py), new stories covered by several outlets get a second opinion on area, place and topic (text in,
   JSON out, every tool off; answers are checked against the lists here).
 - What it's about ("topic") comes from key words, the same way.
 - Each person chooses the areas they follow and topics they don't want, and can mark a story "Relevant to me" or
@@ -424,11 +424,35 @@ def _sid(url):
 
 
 MATCH = 11.0  # how much rare-word overlap two headlines need to be the same story (see _weights)
+# words that turn up in every kind of story: they can add to a match but never make one on their own ("kills two,
+# wounds 60 in central Ukraine" is not the same story as "car explosion kills woman, wounds two in central Israel")
+GENERIC = set("""kill wound injur injure injured hurt dead death die died attack strike bomb blast explosion fire shoot
+shooting crash missile drone rocket central north south east west northern southern eastern western new say said report
+people two three four five six ten dozen year day week month first last man woman child children police official
+government leader world country city state after over amid near could would will may top big more less""".split())
+AREA_GROUP = {"colorado": "us"}  # a Colorado story is also a US story
+APART_MAX = 300
+TIDY_VERSION = 1   # bump when matching changes, so recent stories are checked again once
+
+
+def _stem(w):
+    """A rough word stem, so "strikes", "striking" and "strike" match, and "Zelenskyy's" is "zelenskyy"."""
+    w = re.sub(r"['\u2019](s)?$", "", w)
+    if len(w) > 4 and w.endswith("s") and not w.endswith("ss"):
+        w = w[:-1]
+    if len(w) > 6 and w.endswith("ing"):
+        w = w[:-3]
+    elif len(w) > 5 and w.endswith("ed"):
+        w = w[:-2]
+    return w[:-1] if len(w) > 4 and w.endswith("e") else w
+
+
+GENERIC |= {_stem(w) for w in GENERIC}  # compared after stemming
 
 
 def _words(title):
-    """Key words of a headline, with plain plurals folded ("strikes" -> "strike")."""
-    return {w[:-1] if len(w) > 4 and w.endswith("s") and not w.endswith("ss") else w for w in brief.words(title)}
+    """Key words of a headline, stemmed ("strikes" -> "strik")."""
+    return {_stem(w) for w in brief.words(title)} - {""}
 
 
 def _weights(titles, weak=None):
@@ -440,7 +464,9 @@ def _weights(titles, weak=None):
             df[w] = df.get(w, 0) + 1
     n = max(len(titles), 500) + 1  # a quiet hour or a small test shouldn't make every word look common
     weak = weak or {}
-    return lambda w: (math.log(n / (df.get(w, 0) + 1)) + 0.5) * (WEAK_FACTOR if w in weak else 1.0)
+    # each confirmed flag that blamed a word makes it count for less (0.3, then 0.09, ...); everyday words count half
+    return lambda w: ((math.log(n / (df.get(w, 0) + 1)) + 0.5) * (WEAK_FACTOR ** min(int(weak.get(w, 0) or 0), 3))
+                      * (0.5 if w in GENERIC else 1.0))
 
 
 def weak_words(store):
@@ -450,6 +476,45 @@ def weak_words(store):
         return {}
 
 
+def apart_pairs(store):
+    """What flags taught: [words on one side, words on the other] that are different stories even when other words match."""
+    try:
+        return [(set(a), set(b), f) for a, b, f in json.loads(store.get_raw("news_apart", "") or "[]")]
+    except (ValueError, TypeError):
+        return []
+
+
+def _places(text):
+    return {(p[0], AREA_GROUP.get(p[1], p[1])) for p in find_places(text or "")}
+
+
+def _place_clash(a, b):
+    """Both name places, and none of them, not even the region, is the same: Israel vs Ukraine."""
+    if not a or not b:
+        return False
+    return not ({x[0] for x in a} & {x[0] for x in b}) and not ({x[1] for x in a} & {x[1] for x in b})
+
+
+def _kept_apart(w1, w2, apart):
+    for a, b, _f in apart:
+        if (w1 & a and not w1 & b and w2 & b and not w2 & a) or (w1 & b and not w1 & a and w2 & a and not w2 & b):
+            return True
+    return False
+
+
+def fit(w1, p1, w2, p2, weight, apart=(), need=MATCH):
+    """How well a headline (words w1, places p1) fits a story's headline (w2, p2); 0 when it doesn't.
+    Two or more shared words worth `need`, at least one of them not an everyday word; places that agree (a very
+    strong word match can overrule that: "Geneva talks on Ukraine"); and no pair that a flag said to keep apart."""
+    shared = w1 & w2
+    if len(shared) < 2 or not shared - GENERIC:
+        return 0.0
+    score = sum(weight(x) for x in shared)
+    if score < need or (_place_clash(p1, p2) and score < 2 * need) or _kept_apart(w1, w2, apart):
+        return 0.0
+    return score
+
+
 def file_headlines(store, heads, when=None):
     """Add new headlines; join each to a recent story or start one. Returns the ids of stories made or changed."""
     when = when or now()
@@ -457,9 +522,11 @@ def file_headlines(store, heads, when=None):
     cutoff = _iso(when - timedelta(hours=CLUSTER_HOURS))
     # Each recent story is matched on its first headline only, so stories can't chain into one another through
     # a run of headlines that each share a word or two with the last.
-    recent = {r["id"]: _words(r["headline"]) for r in store._rows("SELECT id, headline FROM news_stories WHERE last_at >= ?", (cutoff,))}
+    recent = {r["id"]: (_words(r["headline"]), _places(r["headline"]))
+              for r in store._rows("SELECT id, headline FROM news_stories WHERE last_at >= ?", (cutoff,))}
     titles = [r["title"] for r in store._rows("SELECT title FROM news_items WHERE at >= ?", (cutoff,))] + [h.get("title") or "" for h in heads]
     weight = _weights(titles, weak_words(store))
+    apart = apart_pairs(store)
     known = {r["url"] for r in store._rows("SELECT url FROM news_items WHERE fetched_at >= ?", (_iso(when - timedelta(days=KEEP_DAYS + 1)),))}
     touched, new = set(), set()
     for hd in heads:
@@ -467,27 +534,99 @@ def file_headlines(store, heads, when=None):
         if not url or not title or url in known or hd.get("outlet") not in brief.OUTLET:
             continue
         known.add(url)
-        w = _words(title)
-        story, best, why = None, MATCH, ""
+        w, pl = _words(title), _places(title)
+        story, best, why = None, 0.0, ""
         if len(w) >= 2:
-            for sid, ws in recent.items():
-                shared = w & ws
-                score = sum(weight(x) for x in shared)
-                if len(shared) >= 2 and score >= best:
+            for sid, (ws, ps) in recent.items():
+                score = fit(w, pl, ws, ps, weight, apart)
+                if score and score >= best:
                     story, best = sid, score
-                    why = json.dumps({"words": sorted(shared), "score": round(score, 1)})
+                    why = json.dumps({"words": sorted(w & ws), "score": round(score, 1)})
         at = hd.get("at") or stamp
         if story is None:
             story = _sid(url)
             store._exec("INSERT OR IGNORE INTO news_stories(id, headline, first_at, last_at) VALUES(?,?,?,?)", (story, title[:300], at, at))
-            recent[story] = w
+            recent[story] = (w, pl)
             new.add(story)
         store._exec("INSERT OR IGNORE INTO news_items(url, outlet, title, summary, at, fetched_at, story, match) VALUES(?,?,?,?,?,?,?,?)",
                     (url, hd["outlet"], title[:300], (hd.get("summary") or "")[:400], at, stamp, story, why))
         touched.add(story)
     for sid in touched:
         _update_story(store, sid, keep_ai=sid not in new)
+    ctx = _context(store, when)
+    for sid in sorted(touched - new):
+        touched |= tidy(store, sid, when, ctx)
     return touched, new
+
+
+def tidy_recent(store, when=None):
+    """Check every recent story with three or more sources once (stories filed before the matcher got stricter)."""
+    when = when or now()
+    ctx = _context(store, when)
+    changed = set()
+    for r in store._rows("SELECT story FROM news_items WHERE at >= ? GROUP BY story HAVING COUNT(*) >= 2", (ctx[2],)):
+        changed |= tidy(store, r["story"], when, ctx)
+    return changed
+
+
+def _context(store, when):
+    """What matching needs: word weights for the last day and a half, and what flags taught."""
+    cutoff = _iso(when - timedelta(hours=CLUSTER_HOURS))
+    titles = [r["title"] for r in store._rows("SELECT title FROM news_items WHERE at >= ?", (cutoff,))]
+    return _weights(titles, weak_words(store)), apart_pairs(store), cutoff
+
+
+def lead(items, weight):
+    """The headline most of a story's sources agree with: it shares the most telling words with the others."""
+    if len(items) < 3:
+        return min(items, key=lambda i: i["at"])
+    ws = [_words(i["title"]) for i in items]
+    best = max(range(len(items)), key=lambda n: (sum(sum(weight(x) for x in ws[n] & ws[m] if x not in GENERIC)
+                                                     for m in range(len(items)) if m != n), -n))
+    return items[best]
+
+
+def refile(store, item, exclude, when=None, weight=None, apart=None, cutoff=None):
+    """Put a headline in the recent story it fits best (not `exclude`), or in a story of its own. Returns the story id."""
+    when = when or now()
+    if weight is None:
+        weight, apart, cutoff = _context(store, when)
+    w, pl = _words(item["title"]), _places(item["title"])
+    best, to = 0.0, None
+    for r in store._rows("SELECT id, headline FROM news_stories WHERE last_at >= ? AND id != ?", (cutoff, exclude)):
+        score = fit(w, pl, _words(r["headline"]), _places(r["headline"]), weight, apart)
+        if score > best:
+            best, to = score, r["id"]
+    why = json.dumps({"words": sorted(w & _words(store._rows("SELECT headline FROM news_stories WHERE id=?", (to,))[0]["headline"])),
+                      "score": round(best, 1)}) if to else ""
+    if to is None:
+        to = _sid(item["url"] + "#split")
+        store._exec("INSERT OR IGNORE INTO news_stories(id, headline, first_at, last_at) VALUES(?,?,?,?)",
+                    (to, item["title"], item["at"], item["at"]))
+    store._exec("UPDATE news_items SET story=?, match=? WHERE id=?", (to, why, item["id"]))
+    _update_story(store, to, keep_ai=False)
+    return to
+
+
+def tidy(store, sid, when=None, ctx=None):
+    """Check a story holds together: its title is the headline most sources share, and a source that doesn't fit
+    that title moves to the story it does fit (or its own). Returns the stories that changed."""
+    when = when or now()
+    weight, apart, cutoff = ctx or _context(store, when)
+    items = store._rows("SELECT id, url, outlet, title, at FROM news_items WHERE story=? ORDER BY at", (sid,))
+    if len(items) < 2:
+        return set()
+    top = lead(items, weight)
+    tw, tp = _words(top["title"]), _places(top["title"])
+    changed = set()
+    for it in items:
+        # a source stays when it fits the title, if a little more loosely than a new headline must
+        if it is top or fit(_words(it["title"]), _places(it["title"]), tw, tp, weight, apart, need=MATCH * 0.8):
+            continue
+        changed.add(refile(store, it, sid, when, weight, apart, cutoff))
+    store._exec("UPDATE news_stories SET headline=? WHERE id=?", (top["title"][:300], sid))
+    _update_story(store, sid)
+    return changed | {sid}
 
 
 def _update_story(store, sid, keep_ai=True):
@@ -556,6 +695,9 @@ def ai_tag(store, ids, ai, limit=60):
 
 def refresh(store, heads, ai=None, when=None, places=()):
     touched, new = file_headlines(store, heads, when)
+    if store.get_raw("news_tidied", 0) != TIDY_VERSION:  # once after an upgrade: re-check stories filed the old way
+        touched |= tidy_recent(store, when)
+        store.set_raw("news_tidied", TIDY_VERSION)
     tagged, err = 0, ""
     if ai and new:
         try:
@@ -689,15 +831,15 @@ def flag(store, user, kind, url, note="", story="", day="", index=None):
 
 
 def _split(store, it):
-    """Move one headline out of its story into a story of its own (it stays in the feed, on its own)."""
-    new = _sid(it["url"] + "#split")
-    store._exec("INSERT OR IGNORE INTO news_stories(id, headline, first_at, last_at) VALUES(?,?,?,?)", (new, it["title"], it["at"], it["at"]))
-    store._exec("UPDATE news_items SET story=? WHERE id=?", (new, it["id"]))
+    """Take one headline out of its story: it goes to the recent story it fits best, or a story of its own (it stays in
+    the feed either way). Then the rest of the story is checked again, since a bad match often brings more."""
+    to = refile(store, it, it["story"])
     rest = store._rows("SELECT title FROM news_items WHERE story=? ORDER BY at LIMIT 1", (it["story"],))
     if rest and store._rows("SELECT 1 FROM news_stories WHERE id=? AND headline=?", (it["story"], it["title"])):
         store._exec("UPDATE news_stories SET headline=? WHERE id=?", (rest[0]["title"], it["story"]))  # it was the lead headline
     _update_story(store, it["story"], keep_ai=True)
-    _update_story(store, new, keep_ai=False)
+    tidy(store, it["story"])
+    return to
 
 
 def _save_brief(store, b):
@@ -712,15 +854,22 @@ def review(store, flag_id, decision, user):
     if not rows:
         raise KeyError(flag_id)
     f = rows[0]
-    if decision not in ("confirm", "dismiss"):
-        raise ValueError("decision is confirm or dismiss")
-    if f["status"] != "open":
+    if decision not in ("confirm", "dismiss", "undo"):
+        raise ValueError("decision is confirm, dismiss or undo")
+    if decision == "undo":  # a confirmed flag was wrong after all: forget what it taught and put the source back
+        if f["status"] != "confirmed":
+            raise ValueError("only a confirmed flag can be undone")
+        if f["kind"] == "feed":
+            _unlearn(store, f)
+        decision = "dismiss"
+    elif f["status"] != "open":
         raise ValueError("already reviewed")
     if decision == "confirm" and f["kind"] == "feed":
         weak = weak_words(store)
         for w in json.loads(f["words"] or "[]"):
             weak[w] = weak.get(w, 0) + 1
         store.set_raw("news_weak_words", json.dumps(dict(sorted(weak.items(), key=lambda kv: -kv[1])[:500])))
+        _learn_apart(store, f)
     if decision == "dismiss":
         if f["kind"] == "feed" and store._rows("SELECT 1 FROM news_stories WHERE id=?", (f["story"],)):
             it = store._rows("SELECT id, story FROM news_items WHERE url=?", (f["url"],))
@@ -739,11 +888,43 @@ def review(store, flag_id, decision, user):
     return flags(store)
 
 
+def _side(title, other):
+    """The telling words on one side of a wrong match: places first, then rare words the other side doesn't have."""
+    w = _words(title) - _words(other) - GENERIC
+    places = {x for x in w if x in PLACES or _PLACE_RE.fullmatch(x)}
+    return sorted(places) + sorted(w - places, key=lambda x: (-len(x), x))[: max(0, 4 - len(places))]
+
+
+def _learn_apart(store, f):
+    """A confirmed flag: remember the two sides, so the same pair isn't matched again whatever words they share."""
+    a, b = _side(f["source_title"], f["story_title"]), _side(f["story_title"], f["source_title"])
+    if not a or not b:
+        return
+    pairs = [[sorted(x), sorted(y), fid] for x, y, fid in apart_pairs(store) if fid != f["id"]]
+    pairs.insert(0, [a, b, f["id"]])
+    store.set_raw("news_apart", json.dumps(pairs[:APART_MAX]))
+
+
+def _unlearn(store, f):
+    """A flag reviewed wrongly and undone: forget what it taught."""
+    store.set_raw("news_apart", json.dumps([[sorted(x), sorted(y), fid] for x, y, fid in apart_pairs(store) if fid != f["id"]]))
+    weak = weak_words(store)
+    for w in json.loads(f["words"] or "[]"):
+        if w in weak:
+            weak[w] -= 1
+            if weak[w] <= 0:
+                del weak[w]
+    store.set_raw("news_weak_words", json.dumps(weak))
+
+
 def flags(store, limit=30):
     rows = store._rows("SELECT * FROM news_flags ORDER BY CASE status WHEN 'open' THEN 0 ELSE 1 END, at DESC LIMIT ?", (limit,))
     for r in rows:
         r["words"] = json.loads(r["words"] or "[]")
         r.pop("user_id", None)
+    taught = {fid: (sorted(a), sorted(b)) for a, b, fid in apart_pairs(store)}
+    for r in rows:
+        r["apart"] = taught.get(r["id"])
     return {"flags": rows, "open": sum(1 for r in rows if r["status"] == "open"),
             "confirmed": store._rows("SELECT COUNT(*) AS n FROM news_flags WHERE status='confirmed'")[0]["n"],
             "weak_words": sorted(weak_words(store), key=lambda w: -weak_words(store)[w])[:30]}

@@ -2,6 +2,7 @@
 
 import json
 import sys
+import tempfile
 import unittest
 import urllib.error
 import urllib.request
@@ -10,6 +11,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from bunkr import auth, quickadd, server  # noqa: E402
+from bunkr.db import Store  # noqa: E402
 from tests import test_phase3 as p3  # noqa: E402
 
 BEANS = {"status": 1, "product": {"product_name": "Black Beans", "brands": "Bush's, Other", "product_quantity": "425",
@@ -110,6 +112,28 @@ class BarcodeHttpTests(unittest.TestCase):
         self.assertTrue(items["beans"]["location_id"])
         self.assertGreater(self.req("GET", "/api/state")[1]["analysis"]["water_days"], 0)
         self.assertEqual(self.req("POST", "/api/items/bulk", {"items": []})[0], 400)
+
+
+class LookupErrorTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.st = Store(Path(self.tmp.name) / "q.db")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_not_in_open_food_facts_is_not_found_not_an_error(self):
+        def missing(url):
+            raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+
+        def down(url):
+            raise urllib.error.HTTPError(url, 503, "Unavailable", {}, None)
+
+        def offline(url):
+            raise urllib.error.URLError("no route")
+        self.assertEqual(quickadd.lookup(self.st, "0011110838094", get=missing), {"code": "0011110838094", "source": "none"})
+        for get in (down, offline):
+            self.assertIn("couldn't reach Open Food Facts", quickadd.lookup(self.st, "0011110838094", get=get)["error"])
 
 
 if __name__ == "__main__":

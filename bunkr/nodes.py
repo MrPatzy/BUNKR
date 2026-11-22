@@ -127,6 +127,9 @@ def plan(node, depot_rows, catalog_meta, budget):
     if prof.get("readers"):
         for r in (r for r in rows if r["kind"] == "tool"):
             take(r)
+    if prof.get("packages", True):   # OS packages for installing with no internet (small); see packages.py
+        for r in (r for r in rows if r["kind"] == "package"):
+            take(r)
     libs = [r for r in rows if r["kind"] == "library" and
             catalog_meta.get(r["item_id"], {}).get("tier", 9) in prof.get("tiers", [])]
     groups_done = set()

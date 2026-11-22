@@ -5,18 +5,16 @@
    outlets (state-run ones labelled as such), plus Colorado news. Headline, short summary and link only.
 2. Without AI: headlines are grouped into stories by shared words and ranked by how many regions cover them.
    This always works, offline included (on what was last fetched).
-3. With AI (on the household's Claude plan): the top stories are summarised as what everyone agrees on, where
-   coverage differs and how, what's unconfirmed, and whether it matters to us. Claude runs with every tool
-   switched off: it gets text in and can only write text out, which is parsed as JSON and checked (links must be
-   ones we fetched). Headlines are other people's words, fenced in the prompt, never instructions.
+3. With AI (optional, off until an admin turns it on; see ai.py): the top stories are summarised as what everyone
+   agrees on, where coverage differs and how, what's unconfirmed, and whether it matters to us. The AI gets text in
+   and can only write text out, which is parsed as JSON and checked (links must be ones we fetched). Headlines are
+   other people's words, fenced in the prompt, never instructions.
 4. Our own situation (Situation tab items) is added as-is, not by the AI.
 """
 
 import html
 import json
-import os
 import re
-import subprocess
 import urllib.request
 import uuid
 import xml.etree.ElementTree as ET
@@ -254,22 +252,6 @@ def material(heads, max_per_outlet=15):
     return "\n".join(lines)
 
 
-def run_claude(prompt, env_file=None, home=None, timeout=600, claude="claude"):
-    """Claude with every tool off: text in, text out. Returns the reply text."""
-    env = {k: v for k, v in os.environ.items() if k in ("PATH", "LANG", "LC_ALL", "TZ")}
-    env["HOME"] = home or env.get("HOME", "/tmp")
-    if env_file and os.path.exists(env_file):
-        for line in open(env_file):
-            if "=" in line and not line.lstrip().startswith("#"):
-                k, v = line.strip().split("=", 1)
-                env[k] = v
-    r = subprocess.run([claude, "-p", "--tools", "", "--strict-mcp-config", "--no-session-persistence", "--output-format", "text"],
-                       input=prompt, capture_output=True, text=True, timeout=timeout, env=env, cwd=env["HOME"])
-    if r.returncode != 0:
-        raise RuntimeError((r.stderr or r.stdout or "claude failed").strip()[:300])
-    return r.stdout
-
-
 def parse_ai(text, heads):
     """The model's JSON, checked: known outlets, links we fetched, sane sizes."""
     m = re.search(r"\{.*\}", text, re.S)
@@ -318,10 +300,10 @@ def build(store, situation_items, use_ai=True, ai=None, opener=None, n_stories=6
     rec = {"id": uuid.uuid4().hex, "created_at": now(), "near": near, "world_routine": cyber, "groups": stories,
            "outlets": {k: {kk: v for kk, v in o.items() if kk != "feed"} for k, o in OUTLET.items()}, "sources": status,
            "headline_count": len(heads), "ai": None, "ai_error": ""}
-    if use_ai and heads:
+    if use_ai and ai and heads:
         try:
             fence = "NEWS-" + uuid.uuid4().hex[:10]
-            text = (ai or run_claude)(PROMPT.format(fence=fence, n=n_stories, material=material(heads)))
+            text = ai(PROMPT.format(fence=fence, n=n_stories, material=material(heads)))
             rec["ai"] = parse_ai(text, heads)
         except Exception as exc:
             rec["ai_error"] = f"{type(exc).__name__}: {exc}"[:300]

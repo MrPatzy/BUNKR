@@ -14,9 +14,10 @@ from pathlib import Path
 
 from . import library, manifest
 
-KINDS = ("library", "tool", "map", "firmware", "radio", "app", "documents", "web", "plan")
+KINDS = ("library", "tool", "map", "firmware", "radio", "app", "documents", "web", "plan", "package")
 SUBDIR = {"library": "library", "tool": "tools", "map": "maps", "firmware": "firmware",
-          "radio": "radio", "app": "apps", "documents": "documents", "web": "web", "plan": "plan"}
+          "radio": "radio", "app": "apps", "documents": "documents", "web": "web", "plan": "plan",
+          "package": "packages"}
 
 
 def _now():
@@ -135,12 +136,14 @@ class Depot:
         self.record("tool", tool["id"], rel, version, dest.stat().st_size, sha, tool["url"])
         return self.by_path(rel)
 
-    def add_file(self, kind, item_id, src, version="", url="", move=False):
+    def add_file(self, kind, item_id, src, version="", url="", move=False, subdir=""):
         """Put a local file (e.g. a document archive or a firmware file) into the store."""
         if kind not in KINDS:
             raise ValueError(f"unknown kind {kind}")
         src = Path(src)
-        rel = f"{SUBDIR[kind]}/{src.name}"
+        if subdir and ("/" in subdir or subdir.startswith(".")):
+            raise ValueError("bad subfolder")
+        rel = f"{SUBDIR[kind]}/{subdir + '/' if subdir else ''}{src.name}"
         dest = self.root / rel
         dest.parent.mkdir(parents=True, exist_ok=True)
         if src.resolve() != dest.resolve():

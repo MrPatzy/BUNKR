@@ -1,4 +1,4 @@
-"""Claude connector: discovery, registration, sign-in with PKCE, tokens, tools, limits."""
+"""The optional AI connector: off by default, then discovery, registration, sign-in with PKCE, tokens, tools, limits."""
 
 import base64
 import hashlib
@@ -12,17 +12,18 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from bunkr import auth, mfa  # noqa: E402
+from bunkr import ai, auth, mfa  # noqa: E402
 from tests import test_phase3 as p3  # noqa: E402
 
 CB = "https://claude.ai/api/mcp/auth_callback"
-CLAUDE_IP = "160.79.104.10"
+ASSISTANT_IP = "160.79.104.10"
 
 
 class McpTests(unittest.TestCase):
     def setUp(self):
         self.hub = p3.Hub()
         st = self.hub.store
+        ai.save_settings(st, {"connector": True})
         auth.create_user(st, "dad", p3.PW, "admin")
         self.garage = st.save_location({"name": "Garage shelf", "kind": "home", "counts_home": 1})
         st.save_item({"name": "Glock 19", "category": "firearms", "quantity": 1, "unit": "", "per_unit": 0,
@@ -33,7 +34,7 @@ class McpTests(unittest.TestCase):
         self.hub.close()
 
     def call(self, method, path, body=None, headers=None, form=False):
-        h = {"CF-Connecting-IP": CLAUDE_IP, "X-Forwarded-Proto": "https", "Host": "bunkr.example"} | (headers or {})
+        h = {"CF-Connecting-IP": ASSISTANT_IP, "X-Forwarded-Proto": "https", "Host": "bunkr.example"} | (headers or {})
         data = None
         if body is not None:
             if form:
@@ -57,7 +58,7 @@ class McpTests(unittest.TestCase):
         self.assertEqual(prm["resource"], "https://bunkr.example/mcp")
         asm = json.loads(self.call("GET", "/.well-known/oauth-authorization-server")[2])
         self.assertIn("S256", asm["code_challenge_methods_supported"])
-        # registration only for Claude's callback
+        # registration only for a listed AI app's callback
         self.assertEqual(self.call("POST", "/mcp/oauth/register", {"redirect_uris": ["https://evil.example/cb"]})[0], 400)
         st, _, b = self.call("POST", "/mcp/oauth/register", {"redirect_uris": [CB], "client_name": "Claude",
                                                              "token_endpoint_auth_method": "none"})
@@ -248,7 +249,7 @@ class McpTests(unittest.TestCase):
         self.tool(a, "undo_change", {"change_id": change})
         self.assertEqual(len(st._rows("SELECT * FROM checkins")), 1)
 
-    def test_outside_claude_and_bad_tokens_are_refused(self):
+    def test_outside_listed_apps_and_bad_tokens_are_refused(self):
         _, tok = self.connect()
         st, _, _ = self.call("POST", "/mcp", {"jsonrpc": "2.0", "id": 1, "method": "ping"},
                              headers={"Authorization": f"Bearer {tok['access_token']}", "CF-Connecting-IP": "203.0.113.5"})

@@ -54,7 +54,8 @@
 <div id="map"></div>
 <div id="msg"></div>
 <div id="legend"><span style="background:#c62828"></span>Act now<span style="background:#ef6c00"></span>Soon / near you<span
-  style="background:#6d7a86"></span>Good to know<span style="background:#1d1d1b;border-radius:2px"></span>Our places</div>
+  style="background:#6d7a86"></span>Good to know<span style="background:#1d1d1b;border-radius:2px"></span>Our places<span
+  style="background:#2e7d32"></span>Neighbors</div>
 <script src="maplibre-gl.js"></script>
 <script src="pmtiles.js"></script>
 <script>
@@ -248,6 +249,8 @@ function addOverlay() {
       "circle-stroke-color": "#ffffff", "circle-stroke-width": 1.5 } });
   map.addLayer({ id: "sit-site", type: "circle", source: "sit", filter: ["==", ["get", "kind"], "site"],
     paint: { "circle-color": "#1d1d1b", "circle-radius": 7, "circle-stroke-color": "#ffffff", "circle-stroke-width": 2.5 } });
+  map.addLayer({ id: "sit-nbr", type: "circle", source: "sit", filter: ["==", ["get", "kind"], "neighbour"],
+    paint: { "circle-color": "#2e7d32", "circle-radius": 6, "circle-stroke-color": "#ffffff", "circle-stroke-width": 2 } });
 }
 async function loadOverlay() {
   try {
@@ -273,7 +276,7 @@ if (OVERLAY) {
 }
 function overlayPopup(f, at) {
   const p = f.properties || {};
-  const where = p.kind === "site" ? "Our place" : [p.km === 0 || p.km === "0" ? "at " + p.site : p.km != null && p.km !== "null" ? p.km + " km from " + p.site : "", p.trust].filter(Boolean).join(" · ");
+  const where = p.kind === "site" ? "Our place" : p.kind === "neighbour" ? ["Neighbor", p.place].filter(Boolean).join(" · ") : [p.km === 0 || p.km === "0" ? "at " + p.site : p.km != null && p.km !== "null" ? p.km + " km from " + p.site : "", p.trust].filter(Boolean).join(" · ");
   const pop = new maplibregl.Popup({ closeButton: true }).setLngLat(at);
   const el = document.createElement("div");
   el.innerHTML = "<b>" + esc(p.title) + "</b>" + (where ? "<br><small>" + esc(where) + "</small>" : "") +
@@ -291,7 +294,7 @@ function overlayPopup(f, at) {
 // Tap a feature: show its name and type in a popup (stands in for the text labels we cannot draw).
 map.on("click", e => {
   if (OVERLAY) {
-    const o = map.queryRenderedFeatures(e.point, { layers: ["sit-site", "sit-point", "sit-area"].filter(id => map.getLayer(id)) })[0];
+    const o = map.queryRenderedFeatures(e.point, { layers: ["sit-site", "sit-nbr", "sit-point", "sit-area"].filter(id => map.getLayer(id)) })[0];
     if (o) return overlayPopup(o, e.lngLat);
   }
   const f = map.queryRenderedFeatures(e.point).find(f => f.layer.id !== "bg" && f.layer.type !== "raster");

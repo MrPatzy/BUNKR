@@ -2,7 +2,7 @@
 
 The copy uses SQLite's online backup, so it is consistent even while BUNKR is writing. It lands in `db-backups/`
 next to the database (the same folder the deploy and schema-change copies use) as bunkr-nightly-YYYYMMDD.db; the
-newest 14 are kept. Secrets that live in files next to the database (the push key, the Claude token, source keys)
+newest 14 are kept. Secrets that live in files next to the database (the push key, the AI login file, source keys)
 are not in it, on purpose.
 
 The restore test opens a throwaway copy of the newest backup, checks it, upgrades it to this code's schema the same

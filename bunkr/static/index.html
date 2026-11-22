@@ -44,6 +44,7 @@
     <button data-tab="medical">Medical</button>
     <button data-tab="comms">Comms</button>
     <button data-tab="scenarios">Scenarios</button>
+    <button data-tab="recovery">Recovery</button>
   </details>
   <details open data-group="supplies"><summary>Supplies</summary>
     <button data-tab="readiness">Readiness</button>
@@ -407,6 +408,9 @@
         <label>Per pack<input name="pack_size" type="number" step="any" min="0" value="1" title="How many are in each one: 24 for a case of 24 bottles. Leave at 1 for single items."></label>
         <label>Of what<input name="pack_unit" placeholder="bottles, bars (optional)"></label>
         <label id="per-unit-label"><span>Size of each</span><span class="inline-pair"><input name="size_value" type="number" step="any" min="0" value="0"><select name="size_unit" aria-label="Size unit"><option>ml</option><option>L</option><option>fl oz</option><option selected>gal</option></select></span></label>
+        <div class="label-read span-all" id="label-read" hidden><button type="button" id="label-read-btn">Read the nutrition label</button>
+          <input type="file" id="label-file" accept="image/*" capture="environment" hidden>
+          <span class="muted" id="label-msg">Take a photo of the Nutrition Facts; BUNKR fills in the calories.</span></div>
         <label class="gun-field" hidden>Type<select name="subtype"><option value="firearm">Firearm</option><option value="ammo">Ammunition</option><option value="magazine">Magazine</option><option value="gear">Other gear</option></select></label>
         <label class="gun-field" hidden>Caliber<input name="caliber" placeholder="9mm, .223 Rem, 12 ga" list="caliber-list"></label>
         <label class="gun-field serial-field" hidden>Serial number<input name="serial" autocomplete="off"></label>
@@ -561,7 +565,8 @@
   <section id="tab-family" class="tab" hidden>
     <div class="card">
       <div class="row"><h2>Family plan</h2>
-        <div class="row-right"><a class="btn" href="/api/family-plan.html" target="_blank" rel="noopener">Print the family plan</a></div></div>
+        <div class="row-right"><a class="btn" href="/api/family-plan.html" target="_blank" rel="noopener">Print the family plan</a>
+          <a class="btn" href="/api/kids-plan.html" target="_blank" rel="noopener">Print the kids' plan</a></div></div>
       <p class="muted">Meeting places come from Sites (types "meeting place"), radio channels from Comms ("In family plan"),
         the rest from this page. The plan is also copied into every encrypted document archive and onto the Pi and laptop.</p>
       <form id="planinfo-form" class="form-grid">
@@ -676,7 +681,192 @@
     <div id="scn-cards"></div>
   </section>
 
+  <section id="tab-recovery" class="tab" hidden>
+    <div class="card">
+      <div class="row"><h2>Home inventory</h2>
+        <div class="row-right"><a class="btn" href="/api/insurance-list.html" target="_blank" rel="noopener">Print for insurance</a>
+          <a class="btn" href="/api/insurance-list.csv" download="home-inventory.csv">Export CSV</a></div></div>
+      <p class="muted">What we own, room by room, with photos, for an insurance claim after a fire, flood or theft.
+        It stays on the home hub and goes in the encrypted document archive.<span data-admin-field> Serial numbers and receipts are seen by admins only.</span></p>
+      <p id="rc-totals"></p>
+      <div id="rc-rooms" class="row-right"></div>
+      <details id="rc-edit-box"><summary>Add rooms and items</summary>
+        <form id="rc-room-form" class="row gap">
+          <input name="name" placeholder="New room, e.g. Garage" required aria-label="Room name">
+          <button type="submit">Add room</button>
+        </form>
+        <form id="rc-item-form" class="form-grid">
+          <label>What is it<input name="name" required placeholder="e.g. TV"></label>
+          <label>Room<select name="room_id" id="rc-item-room"></select></label>
+          <label>Kind<input name="category" list="rc-cats" placeholder="Electronics"></label>
+          <datalist id="rc-cats"></datalist>
+          <label>Make and model<input name="make_model"></label>
+          <label data-admin-field>Serial number<input name="serial" autocomplete="off"></label>
+          <label>Bought on<input name="purchased" type="date"></label>
+          <label>Paid ($)<input name="price_paid" type="number" min="0" step="0.01"></label>
+          <label>To replace ($)<input name="replacement_value" type="number" min="0" step="0.01"></label>
+          <label class="span2">Notes<input name="notes"></label>
+          <div class="actions span-all"><button type="submit" class="primary" id="rc-item-save">Add item</button>
+            <button type="button" id="rc-item-cancel" hidden>Cancel edit</button></div>
+        </form>
+      </details>
+    </div>
+    <div id="rc-items"></div>
+    <div class="card">
+      <div class="row"><h2>Food plan</h2>
+        <div class="row-right"><label>Days <input id="mp-days" type="number" min="1" max="90" value="7" style="width:5em"></label>
+          <a class="btn" id="mp-print" href="/api/meal-plan.html?days=7" target="_blank" rel="noopener">Print</a></div></div>
+      <p class="muted">From the food in Inventory: how long it lasts, what to eat first, and a plan for each day.</p>
+      <div id="mp-out"></div>
+    </div>
+    <div class="card" id="fin-card" hidden>
+      <div class="row"><h2>Money and accounts</h2>
+        <div class="row-right"><a class="btn" href="/api/finance-sheet.html" target="_blank" rel="noopener">Print</a></div></div>
+      <p class="muted">Admins only. Who to call to get money, file a claim or pause bills. Never synced, never on phones offline,
+        never shown to the AI connector. Keep only the last 4 digits of any number.</p>
+      <div id="fin-list"></div>
+      <details id="fin-box"><summary id="fin-summary">Add an account</summary>
+        <form id="fin-form" class="form-grid">
+          <label>Bank or company<input name="institution" required></label>
+          <label>Kind<select name="kind" id="fin-kind"></select></label>
+          <label>Whose<input name="holder"></label>
+          <label>Last 4 digits<input name="last4" inputmode="numeric" maxlength="9" pattern="[0-9 *xX•-]*" autocomplete="off"></label>
+          <label>Phone<input name="phone" type="tel"></label>
+          <label>Website<input name="website"></label>
+          <label>Who to call<input name="contact" placeholder="Agent's name, claims line"></label>
+          <label class="span2">Paperwork is in<input name="paperwork" placeholder="Fire safe, blue folder"></label>
+          <label class="span-all">Policy and claim notes<textarea name="notes" rows="2"></textarea></label>
+          <div class="actions span-all"><button type="submit" class="primary" id="fin-save">Add</button>
+            <button type="button" id="fin-cancel" hidden>Cancel edit</button></div>
+        </form>
+      </details>
+    </div>
+  </section>
+
   <section id="tab-comms" class="tab" hidden>
+    <div id="partner-cards"></div>
+    <div class="card">
+      <h2>Radio nets</h2>
+      <p class="muted">Regular on-air meetups. The next one shows on the maintenance calendar.</p>
+      <ul class="plan-list" id="net-list"></ul>
+      <details id="net-edit" data-adult><summary>Add a net</summary>
+        <form id="net-form" class="form-grid">
+          <label>Name<input name="name" required placeholder="County ARES net"></label>
+          <label>Frequency or channel<input name="freq" placeholder="146.940 or GMRS 20"></label>
+          <label>Mode<select name="mode" id="net-mode"></select></label>
+          <label>Day<select name="weekday" id="net-day"></select></label>
+          <label>Time<input name="time" type="time"></label>
+          <label>Net control<input name="net_control" placeholder="Callsign or name"></label>
+          <label class="span2">Notes<input name="notes"></label>
+          <div class="actions span-all"><button type="submit" class="primary">Save net</button>
+            <button type="button" id="net-cancel" hidden>Cancel edit</button></div>
+        </form>
+      </details>
+      <h3>Check-in log</h3>
+      <form id="netlog-form" class="form-grid">
+        <label>Net<select name="net_id" id="netlog-net"></select></label>
+        <label>When<input name="at" type="datetime-local"></label>
+        <label>Who checked in<input name="who" required placeholder="Callsign or name"></label>
+        <label>Signal<input name="signal" placeholder="59, weak, full quieting"></label>
+        <label class="span2">Notes<input name="notes"></label>
+        <div class="actions span-all"><button type="submit" class="primary">Log check-in</button></div>
+      </form>
+      <div class="table-wrap"><table id="netlog-table">
+        <thead><tr><th>When</th><th>Net</th><th>Who</th><th>Signal</th><th>Notes</th><th></th></tr></thead><tbody></tbody></table></div>
+    </div>
+    <div class="card">
+      <h2>Messages (ICS-213)</h2>
+      <p class="muted">The standard written message. Print it, or copy it as plain text to paste into Winlink Express or JS8Call.</p>
+      <details id="ics-edit" data-adult><summary id="ics-summary">Write a message</summary>
+        <form id="ics-form" class="form-grid">
+          <label>Sent or received<select name="direction"><option value="sent">Sent</option><option value="received">Received</option></select></label>
+          <label>Incident (optional)<input name="incident"></label>
+          <label>To<input name="to_name" required></label>
+          <label>To position<input name="to_position" placeholder="e.g. Net control"></label>
+          <label>From<input name="from_name" required></label>
+          <label>From position<input name="from_position"></label>
+          <label class="span2">Subject<input name="subject"></label>
+          <label>Date<input name="msg_date" type="date"></label>
+          <label>Time<input name="msg_time" type="time"></label>
+          <label class="span-all">Message<textarea name="message" rows="6" required></textarea></label>
+          <label>Approved by<input name="approved_name"></label>
+          <label>Approver position<input name="approved_position"></label>
+          <label class="span-all">Reply<textarea name="reply" rows="3"></textarea></label>
+          <label>Replied by<input name="reply_name"></label>
+          <label>Replier position<input name="reply_position"></label>
+          <label>Reply date/time<input name="reply_at" placeholder="2026-11-22 1930"></label>
+          <div class="actions span-all"><button type="submit" class="primary">Save message</button>
+            <button type="button" id="ics-cancel" hidden>Cancel edit</button></div>
+        </form>
+      </details>
+      <ul class="plan-list" id="ics-list"></ul>
+    </div>
+    <div class="card">
+      <h2>Neighbors</h2>
+      <p class="muted">Who's around us and what they can help with. Those with a position show on the Situation map.</p>
+      <div class="row gap"><label>Skill<select id="nb-filter"><option value="">Anyone</option></select></label></div>
+      <div id="nb-list"></div>
+      <details id="nb-edit" data-adult><summary id="nb-summary">Add a neighbor</summary>
+        <form id="nb-form" class="form-grid">
+          <label>Name<input name="name" required></label>
+          <label class="span2">Address or place<input name="place" placeholder="Blue house on the corner"></label>
+          <label>Phone<input name="phone" type="tel"></label>
+          <label>Callsign<input name="callsign"></label>
+          <label>Email or other<input name="contact"></label>
+          <label>Latitude (optional)<input name="lat" type="number" step="any"></label>
+          <label>Longitude (optional)<input name="lon" type="number" step="any"></label>
+          <fieldset class="span-all profile"><legend>Skills</legend><div class="na-list" id="nb-skills"></div></fieldset>
+          <label class="span2">Other skills<input name="skills_other" placeholder="Beekeeper, nurse in training"></label>
+          <label class="span-all">Notes<input name="notes"></label>
+          <div class="actions span-all"><button type="submit" class="primary">Save neighbor</button>
+            <button type="button" id="nb-cancel" hidden>Cancel edit</button></div>
+        </form>
+      </details>
+    </div>
+    <div class="card">
+      <h2>Licenses and skills</h2>
+      <p class="muted">Radio licenses and certificates for each person. BUNKR reminds the person and admins 60 days before one
+        expires, and it shows on the maintenance calendar.</p>
+      <div id="lic-due"></div>
+      <div class="table-wrap"><table id="lic-table">
+        <thead><tr><th>Person</th><th>What</th><th>Callsign / number</th><th>Expires</th><th></th></tr></thead><tbody></tbody></table></div>
+      <details id="lic-edit"><summary id="lic-summary">Add a license or certificate</summary>
+        <form id="lic-form" class="form-grid">
+          <label>Person<select name="person_id" id="lic-person" required></select></label>
+          <label>What<select name="kind" id="lic-kind"></select></label>
+          <label>Name (for Other)<input name="label" placeholder="Wilderness First Responder"></label>
+          <label>Ham class<select name="class" id="lic-class"><option value="">—</option></select></label>
+          <label>Callsign<input name="callsign"></label>
+          <label>Number<input name="number" placeholder="Certificate or FRN"></label>
+          <label>Expires<input name="expires" type="date"></label>
+          <label class="span2">Notes<input name="notes"></label>
+          <div class="actions span-all"><button type="submit" class="primary">Save</button>
+            <button type="button" id="lic-cancel" hidden>Cancel edit</button></div>
+        </form>
+      </details>
+    </div>
+    <div class="card" id="partner-setup" data-admin hidden>
+      <h2>Partner hubs</h2>
+      <p class="muted">For a trusted neighbor who runs their own BUNKR. Off until you set it up. A share never includes
+        firearms, medical, documents, money, supplies, or where anyone is.</p>
+      <h3>Share with a partner</h3>
+      <form id="share-form" class="form-grid">
+        <label>Who it's for<input name="name" required placeholder="The Garcias"></label>
+        <fieldset class="span-all profile"><legend>Includes</legend><div class="na-list" id="share-parts"></div></fieldset>
+        <div class="actions span-all"><button type="submit" class="primary">Make share</button></div>
+      </form>
+      <div id="share-new"></div>
+      <ul class="plan-list" id="share-list"></ul>
+      <h3>Read a partner's share</h3>
+      <form id="partner-form" class="form-grid">
+        <label>Name<input name="name" required placeholder="Garcia house"></label>
+        <label class="span2">Share address<input name="url" placeholder="https://their-bunkr/api/partner/…"></label>
+        <label class="span2">Token<input name="token" type="password" autocomplete="off" placeholder="blank = keep the saved one"></label>
+        <div class="actions span-all"><button type="submit" class="primary">Save partner</button>
+          <button type="button" id="partner-cancel" hidden>Cancel edit</button></div>
+      </form>
+      <ul class="plan-list" id="partner-list"></ul>
+    </div>
     <div class="card">
       <div class="row"><h2>Radios</h2>
         <div class="row-right"><a class="btn" href="/api/radio/cards.html" target="_blank" rel="noopener">Print all channel cards</a>
@@ -1047,6 +1237,72 @@
         <div class="actions span-all"><button type="submit" class="primary">Save</button> <button type="button" id="ha-test">Test the connection</button>
           <button type="button" class="link" id="ha-forget" hidden>Forget the token</button></div>
       </form>
+    </div>
+    <div class="card" id="ai-card" hidden>
+      <h2>AI (optional)</h2>
+      <p class="muted">BUNKR works fully without AI. Turn these on only if you want them. Nothing else in BUNKR uses AI.</p>
+      <form id="ai-form" class="form-grid">
+        <label class="check span-all"><input type="checkbox" name="summaries"> AI summaries in the morning brief and news
+          <span class="muted">(where outlets agree and differ; sorting stories by place and topic)</span></label>
+        <label class="check span-all"><input type="checkbox" name="connector"> AI connector (MCP)
+          <span class="muted">(an AI assistant can read your inventory and add or move items after you sign in; never firearms)</span></label>
+        <label class="span2">Where the AI runs<select name="provider"></select></label>
+        <label class="ai-ollama">Ollama address<input name="ollama_url" autocomplete="off" spellcheck="false" placeholder="http://127.0.0.1:11434"></label>
+        <label class="ai-ollama">Model<input name="model" autocomplete="off" spellcheck="false" placeholder="llama3.1:8b"></label>
+        <p class="muted span-all" id="ai-note"></p>
+        <div class="actions span-all"><button type="submit" class="primary">Save</button> <button type="button" id="ai-test">Test the AI</button></div>
+      </form>
+    </div>
+    <div class="card" id="naming-card" hidden>
+      <h2>Names for scanned items</h2>
+      <p class="muted">How BUNKR names a product it finds by barcode, so like items sort together. You can still change any name before saving.</p>
+      <form id="naming-form" class="form-grid">
+        <label class="span2">Start from<select name="preset"><option value="">Pick a style…</option></select></label>
+        <div class="span-all">
+          <div class="muted">Your pattern, left to right. Tap a piece to move or remove it.</div>
+          <div class="chips name-pieces" id="naming-pieces"></div>
+          <div class="actions" id="naming-move" hidden><button type="button" data-move="-1">◀ Move left</button>
+            <button type="button" data-move="1">Move right ▶</button> <button type="button" data-move="0">Remove</button></div>
+        </div>
+        <label>Add a field<select name="add_field"><option value="">Add…</option></select></label>
+        <label>Add punctuation<select name="add_punct"><option value="">Add…</option>
+          <option value=", ">, comma</option><option value=" ">space</option><option value=" - ">- dash</option>
+          <option value=" / ">/ slash</option><option value=" | ">| bar</option><option value=": ">: colon</option>
+          <option value="; ">; semicolon</option><option value=".">. dot</option>
+          <option value="[">[ open</option><option value="]">] close</option><option value="(">( open</option><option value=")">) close</option></select></label>
+        <label>Capitals<select name="caps"></select></label>
+        <label>Between details<select name="joiner"></select></label>
+        <div class="span-all"><div class="muted">Looks like:</div><ul class="name-examples" id="naming-examples"></ul>
+          <p class="muted" id="naming-problem" hidden></p></div>
+        <p class="muted span-all">Empty fields drop out with the punctuation before them. New pieces go after the one you tapped.</p>
+        <div class="actions span-all"><button type="submit" class="primary">Save</button> <button type="button" id="naming-default">Use the default</button></div>
+      </form>
+    </div>
+    <div class="card" id="foodsources-card" hidden>
+      <h2>Barcode lookups</h2>
+      <p class="muted">Where BUNKR looks up a barcode it hasn't seen, in order. All are free; only the barcode number is sent.</p>
+      <form id="foodsources-form" class="form-grid">
+        <p class="span-all">1. Open Food Facts (always) · 2. Kroger (below, if set up)</p>
+        <label class="check span-all"><input type="checkbox" name="upcitemdb"> 3. UPCitemdb <span class="muted">(names and sizes, up to 100 a day)</span></label>
+        <label class="check span-all"><input type="checkbox" name="usda"> 4. USDA FoodData Central <span class="muted">(calories for many brands; also fills in calories the others miss)</span></label>
+        <label class="span2">Your own USDA key (optional)<input name="usda_key" type="password" autocomplete="off" placeholder="Free from api.data.gov; without one BUNKR uses the shared DEMO_KEY"></label>
+        <p class="muted span-all" id="foodsources-note"></p>
+        <div class="actions span-all"><button type="submit" class="primary">Save</button> <button type="button" class="link" id="usda-forget" hidden>Forget my USDA key</button></div>
+      </form>
+    </div>
+    <div class="card" id="kroger-card" hidden>
+      <h2>Barcode lookup: Kroger</h2>
+      <p class="muted">When a scanned barcode isn't in Open Food Facts, BUNKR can look it up in Kroger's catalog (Kroger, King Soopers,
+        Ralphs, Fred Meyer and their other stores, including store brands). Only the barcode number is sent.</p>
+      <form id="kroger-form" class="form-grid">
+        <label>Client id<input name="client_id" autocomplete="off" spellcheck="false"></label>
+        <label>Client secret<input name="client_secret" type="password" autocomplete="off" placeholder="leave empty to keep it"></label>
+        <p class="muted span-all">Free: sign in at <a href="https://developer.kroger.com" target="_blank" rel="noopener">developer.kroger.com</a>,
+          create an application (production), and give it the <b>Product</b> scope. Paste its client id and secret here.</p>
+        <div class="actions span-all"><button type="submit" class="primary">Save</button> <button type="button" id="kroger-test">Test it</button>
+          <button type="button" class="link" id="kroger-forget" hidden>Forget the secret</button></div>
+      </form>
+      <p class="muted" id="kroger-status"></p>
     </div>
     <div class="card" id="version-card">
       <h2>BUNKR version</h2>

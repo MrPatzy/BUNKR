@@ -38,7 +38,8 @@ plain HTML/JS phone-friendly web app. No pip packages, no cloud account.
 - **Security:**
   - Logins, passkeys, two-step login and an audit log.
   - Firearms and serial numbers are admin-only and never leave the hub.
-- **Optional:** Home Assistant, a Claude connector (MCP), and an AI-written morning brief.
+- **Optional extras:** Home Assistant.
+- **Optional AI, off by default:** AI summaries in the morning brief, and an AI connector (MCP). See below.
 
 The offline app works on phones as an installed web app (Add to Home Screen) and keeps the last data it saw when
 the connection drops.
@@ -55,7 +56,7 @@ It opens http://127.0.0.1:8765 and only listens on that computer. Data goes in `
 
 For a hub, a Raspberry Pi field node or a laptop node, see [deploy/INSTALL.md](deploy/INSTALL.md).
 
-Requirements (Ubuntu or Debian): `python3` (3.12), `python3-cryptography`, `7zip`, `rsync`.
+Requirements (Ubuntu or Debian): `python3` (3.12), `python3-cryptography`, `7zip`, `rsync`. Optional: `tesseract-ocr`, to read calories off nutrition label photos.
 
 ## Keys and outside services
 
@@ -65,9 +66,21 @@ BUNKR can read:
 - FlightAware AeroAPI (flight times);
 - a mail account (reminder emails);
 - Home Assistant;
+- Kroger's product catalog (barcode lookups for Kroger-family stores and store brands);
+- USDA FoodData Central (works without a key; a free api.data.gov key allows more lookups);
 - Reddit (only with Reddit's approval).
 
 Each install uses its own keys, and BUNKR never shares data with anyone else.
+
+## AI is optional
+
+BUNKR doesn't need AI or any AI subscription. A new install has it off, and every feature works without it. If you
+want it, one card on the Household tab ("AI (optional)") turns on:
+- **AI summaries:** the morning brief says where outlets agree and differ, and news stories get sorted by place and topic.
+- **AI connector (MCP):** an AI assistant can read your inventory and add or move items, after you sign in. Never firearms.
+
+It can run on a free local model (Ollama, on your own computer) or a command-line AI tool on the hub. Nothing else
+in BUNKR uses AI.
 
 ## Versions and upgrades
 

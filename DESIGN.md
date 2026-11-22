@@ -18,6 +18,16 @@
 - **Dependencies:** the standard library only, plus `python3-cryptography`, imported inside the functions that need it. Nothing makes a network call at import time.
 - **Secrets:** keys and tokens are files next to the database (mode 600). They never go in the database, the API, sync or logs.
 
+## Optional AI
+
+- **Off by default:** a new install uses no AI anywhere, and every feature works without it.
+- **One switch:** the "AI (optional)" card on the Household tab turns on, separately, AI summaries (the morning brief's
+  write-ups and sorting news stories by place and topic) and the AI connector (MCP). Nothing else uses AI.
+- **Where it runs:** a local model through Ollama (free, stays on your network), or a command-line AI tool on the hub
+  (`--ai-cli`). All of it goes through `bunkr/ai.py`.
+- **Safety:** text in, text out. Headlines are fenced as other people's words; replies are parsed and checked, never run.
+  The connector is narrow (`bunkr/mcp_tools.py`): no firearms, no deleting what it didn't add, every change undoable.
+
 ## Notifications
 
 - **Who gets what:** `notify.plan` decides, by event, who gets a push. It follows calm rules: life-safety always comes through; "soon / near you" alerts respect quiet hours and a daily cap; and repeats collapse into one.
@@ -49,5 +59,5 @@ logout clears it.
 
 ## Sensitive data
 
-- **Firearms:** firearms and serial numbers are admin-only. They're stripped from sync, the Claude connector, the offline cache and family views.
+- **Firearms:** firearms and serial numbers are admin-only. They're stripped from sync, the AI connector, the offline cache and family views.
 - **The audit log** records logins, changes, and who looked at firearms, documents, medical details and printouts.

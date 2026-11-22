@@ -22,7 +22,7 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import brief, checkins, manifest, situation
+from . import brief, checkins, comms, manifest, situation
 
 USER_AGENT = "BUNKR-node/0.2"
 # Serial numbers are not synced: they stay on the hub (and in the encrypted archive).
@@ -322,6 +322,7 @@ def sync_records(client, store, log=print):
     result = apply_records(store, res["changes"], since, source="hub")
     result["family"] = checkins.apply(store, res["changes"], from_hub=True)
     result["situation"] = situation.apply(store, res["changes"])
+    result["comms"] = comms.apply(store, res["changes"])
     result["briefs"] = brief.apply(store, res["changes"])
     store.set_raw("sync_cursor", res["cursor"])
     log(f"Records: sent {len(out['items'])} items / {len(out['locations'])} locations, "

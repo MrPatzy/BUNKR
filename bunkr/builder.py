@@ -115,8 +115,13 @@ def _encrypt_documents(job, docs, passphrase, out_dir, split, extra=None):
     with tempfile.TemporaryDirectory(prefix="bunkr-") as stage_dir:
         stage = Path(stage_dir)
         _stage_documents(docs, stage)
-        for name, text in (extra or {}).items():  # generated files, e.g. the family plan
-            (stage / name).write_text(text)
+        for name, text in (extra or {}).items():  # generated files (the family plan), or a Path to copy (a photo)
+            dest = stage / name
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            if isinstance(text, Path):
+                os.symlink(text, dest)
+            else:
+                dest.write_text(text)
         cmd = ["7z", "a", "-t7z", "-mhe=on", "-mx=5", "-p", "-bsp1", "-bso0", str(tmp), "."]
         if split:
             cmd.insert(-2, f"-v{planner.FAT32_VOLUME // 1024 ** 2}m")

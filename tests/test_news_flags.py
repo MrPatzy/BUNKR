@@ -194,6 +194,7 @@ class HttpTests(unittest.TestCase):
     def test_flag_and_review(self):
         code, r = self.req("POST", "/api/news/flags", {"kind": "feed", "story": self.sid, "url": ZEL["url"], "note": "Ukraine"}, user="kid")
         self.assertEqual((code, r["reviewed"]), (200, False))
+        self.assertEqual((r["moved_to"], r["story_now"]), (ZEL["title"], MUSK["title"]))   # where it went, what's left
         self.assertEqual(self.req("POST", "/api/news/flags", {"kind": "feed", "story": self.sid, "url": "https://nope/"}, user="kid")[0], 404)
         self.assertEqual(self.req("GET", "/api/news/flags", user="kid")[0], 403)
         f = self.req("GET", "/api/news/flags")[1]
@@ -206,3 +207,60 @@ class HttpTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# the mismatch from the hub on 2026-11-21: everyday words ("central", "kills", "wounds") joined two places
+ISRAEL = head("haaretz", "Car explosion kills woman, wounds her two children in central Israel", "https://x.test/il1")
+KRYVYI = head("ap", "Ballistic missile attack on Zelenskyy's hometown in central Ukraine kills 2 and wounds scores", "https://x.test/ua1")
+KRYVYI2 = head("aljazeera", "Russian strike kills two, wounds 60, in Zelenskyy's hometown", "https://x.test/ua2")
+KRYVYI3 = head("dw", "Russia strikes Zelenskyy's hometown, killing 2", "https://x.test/ua3")
+
+
+class MatchingTests(Base):
+    def story(self, url, st=None):
+        return (st or self.st)._rows("SELECT story FROM news_items WHERE url=?", (url,))[0]["story"]
+
+    def test_places_and_everyday_words_dont_make_a_story(self):
+        news.refresh(self.st, [ISRAEL, KRYVYI, KRYVYI2, KRYVYI3])
+        self.assertNotEqual(self.story(ISRAEL["url"]), self.story(KRYVYI["url"]))
+        self.assertEqual(len({self.story(h["url"]) for h in (KRYVYI, KRYVYI2, KRYVYI3)}), 1)
+        w = lambda x: 6.0
+        self.assertEqual(news.fit({"kill", "wound", "central"}, set(), {"kill", "wound", "central"}, set(), w), 0)   # everyday only
+        self.assertTrue(news.fit({"zelenskyy", "hometown"}, set(), {"zelenskyy", "hometown", "kill"}, set(), w))
+
+    def test_an_old_bad_story_is_fixed_and_titled_by_its_sources(self):
+        # filed the old way: the Israel headline first, the Ukraine ones under it
+        self.st._exec("INSERT INTO news_stories(id, headline, first_at, last_at) VALUES('bad', ?, ?, ?)", (ISRAEL["title"], ISRAEL["at"], ISRAEL["at"]))
+        for h in (ISRAEL, KRYVYI, KRYVYI2):
+            self.st._exec("INSERT INTO news_items(url, outlet, title, summary, at, fetched_at, story, match) VALUES(?,?,?,?,?,?,?,?)",
+                          (h["url"], h["outlet"], h["title"], "", h["at"], h["at"], "bad", ""))
+        news._update_story(self.st, "bad")
+        news.tidy_recent(self.st, NOW)
+        self.assertNotEqual(self.story(ISRAEL["url"]), "bad")                   # the odd one out moved
+        self.assertIn("Zelenskyy", self.st._rows("SELECT headline FROM news_stories WHERE id='bad'")[0]["headline"])
+
+    def test_a_flag_moves_the_source_where_it_fits_and_learns(self):
+        news.refresh(self.st, [KRYVYI2, KRYVYI3])
+        right = self.story(KRYVYI2["url"])
+        self.st._exec("INSERT INTO news_stories(id, headline, first_at, last_at) VALUES('bad', ?, ?, ?)", (ISRAEL["title"], ISRAEL["at"], ISRAEL["at"]))
+        for h in (ISRAEL, KRYVYI):
+            self.st._exec("INSERT INTO news_items(url, outlet, title, summary, at, fetched_at, story, match) VALUES(?,?,?,?,?,?,?,?)",
+                          (h["url"], h["outlet"], h["title"], "", h["at"], h["at"], "bad", json.dumps({"words": ["central", "kill", "wound"]})))
+        news._update_story(self.st, "bad")
+        fid = news.flag(self.st, ADMIN, "feed", KRYVYI["url"], story="bad")      # an admin's flag counts at once
+        self.assertEqual(self.story(KRYVYI["url"]), right)                       # into the Zelenskyy story, not a card of its own
+        pairs = news.apart_pairs(self.st)
+        self.assertTrue(pairs and "ukrain" in pairs[0][0] | pairs[0][1] and "israel" in pairs[0][0] | pairs[0][1])
+        self.assertTrue(news._kept_apart({"israel", "car"}, {"ukrain", "missil"}, pairs))
+        self.assertFalse(news._kept_apart({"israel", "ukrain"}, {"ukrain"}, pairs))   # both sides named: no block
+        # undo: the lesson is forgotten and the source goes back
+        news.review(self.st, fid, "undo", ADMIN)
+        self.assertEqual(news.apart_pairs(self.st), [])
+        self.assertEqual(news.weak_words(self.st), {})
+        self.assertEqual(self.story(KRYVYI["url"]), "bad")
+        with self.assertRaises(ValueError):
+            news.review(self.st, fid, "undo", ADMIN)
+
+    def test_lead_is_the_headline_most_sources_share(self):
+        items = [dict(h, at=f"2026-11-21T0{n}:00:00+00:00") for n, h in enumerate((ISRAEL, KRYVYI, KRYVYI2, KRYVYI3))]
+        self.assertNotEqual(news.lead(items, lambda w: 3.0)["url"], ISRAEL["url"])
