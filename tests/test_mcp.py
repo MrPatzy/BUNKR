@@ -12,18 +12,20 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from bunkr import ai, auth, mfa  # noqa: E402
+from bunkr import ai, auth, mcp, mfa  # noqa: E402
+from bunkr.db import Store  # noqa: E402
 from tests import test_phase3 as p3  # noqa: E402
 
-CB = "https://claude.ai/api/mcp/auth_callback"
-ASSISTANT_IP = "160.79.104.10"
+CB = "https://assistant.example/api/mcp/auth_callback"
+ASSISTANT_IP = "198.51.100.10"
+APPS = {"redirects": [CB], "origins": ["https://assistant.example"], "egress": ["198.51.100.0/24"]}
 
 
 class McpTests(unittest.TestCase):
     def setUp(self):
         self.hub = p3.Hub()
         st = self.hub.store
-        ai.save_settings(st, {"connector": True})
+        ai.save_settings(st, {"connector": True, "connector_apps": APPS})
         auth.create_user(st, "dad", p3.PW, "admin")
         self.garage = st.save_location({"name": "Garage shelf", "kind": "home", "counts_home": 1})
         st.save_item({"name": "Glock 19", "category": "firearms", "quantity": 1, "unit": "", "per_unit": 0,
@@ -60,7 +62,7 @@ class McpTests(unittest.TestCase):
         self.assertIn("S256", asm["code_challenge_methods_supported"])
         # registration only for a listed AI app's callback
         self.assertEqual(self.call("POST", "/mcp/oauth/register", {"redirect_uris": ["https://evil.example/cb"]})[0], 400)
-        st, _, b = self.call("POST", "/mcp/oauth/register", {"redirect_uris": [CB], "client_name": "Claude",
+        st, _, b = self.call("POST", "/mcp/oauth/register", {"redirect_uris": [CB], "client_name": "Assistant",
                                                              "token_endpoint_auth_method": "none"})
         self.assertEqual(st, 201)
         cid = json.loads(b)["client_id"]
@@ -252,6 +254,9 @@ class McpTests(unittest.TestCase):
     def test_outside_listed_apps_and_bad_tokens_are_refused(self):
         _, tok = self.connect()
         st, _, _ = self.call("POST", "/mcp", {"jsonrpc": "2.0", "id": 1, "method": "ping"},
+                             headers={"Authorization": f"Bearer {tok['access_token']}", "Origin": "https://assistant.example"})
+        self.assertEqual(st, 200)
+        st, _, _ = self.call("POST", "/mcp", {"jsonrpc": "2.0", "id": 1, "method": "ping"},
                              headers={"Authorization": f"Bearer {tok['access_token']}", "CF-Connecting-IP": "203.0.113.5"})
         self.assertEqual(st, 403)
         st, _, _ = self.call("POST", "/mcp", {"jsonrpc": "2.0", "id": 1, "method": "ping"},
@@ -262,6 +267,55 @@ class McpTests(unittest.TestCase):
         self.assertEqual(self.call("GET", "/mcp")[0], 405)
         # the rest of BUNKR still needs a normal login
         self.assertEqual(self.call("GET", "/api/state", headers={"Authorization": f"Bearer {tok['access_token']}"})[0], 401)
+
+
+class AppListTests(unittest.TestCase):
+    """Which AI apps may connect is the admin's list: exact, https only, nothing wildcarded."""
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.TemporaryDirectory()
+        self.st = Store(Path(self.tmp.name) / "a.db")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_new_install_lists_none(self):
+        self.assertEqual(mcp.apps(self.st), {"redirects": [], "origins": [], "egress": []})
+        with self.assertRaises(mcp.OAuthError):
+            mcp.register(self.st, {"redirect_uris": [CB]})
+
+    def test_an_upgraded_install_keeps_its_signed_up_apps(self):
+        self.st._exec("INSERT INTO mcp_clients(client_id, name, redirect_uris, created_at) VALUES(?,?,?,?)",
+                      ("c", "x", json.dumps([CB, "javascript:alert(1)"]), "2026-11-19"))
+        a = mcp.apps(self.st)
+        self.assertEqual(a, {"redirects": [CB], "origins": ["https://assistant.example"], "egress": []})
+        self.assertTrue(mcp.from_assistant(self.st, "203.0.113.5"))       # no networks listed: not checked
+        self.assertEqual(mcp.register(self.st, {"redirect_uris": [CB]})["redirect_uris"], [CB])
+
+    def test_checks(self):
+        for bad in ({"redirects": ["http://assistant.example/cb"]}, {"redirects": ["https://*.example/cb"]},
+                    {"redirects": ["https://user@assistant.example/cb"]}, {"redirects": ["https://a.example/cb#x"]},
+                    {"redirects": ["https://a.example/cb; script-src *"]}, {"origins": ["https://*.example"]},
+                    {"origins": ["https://a.example/path"]}, {"origins": ["*"]}, {"egress": ["0.0.0.0/0"]},
+                    {"egress": ["not a network"]}, {"redirects": [f"https://a{i}.example/cb" for i in range(30)]}):
+            with self.assertRaises(ValueError, msg=bad):
+                mcp.save_apps(self.st, bad)
+        a = mcp.save_apps(self.st, {"redirects": CB + "\n", "origins": ["https://Assistant.example/"], "egress": ["198.51.100.7/24"]})
+        self.assertEqual(a, {"redirects": [CB], "origins": ["https://assistant.example"], "egress": ["198.51.100.0/24"]})
+        self.assertEqual(mcp.origins(self.st), ["https://assistant.example"])
+        self.assertTrue(mcp.from_assistant(self.st, ""))
+        self.assertTrue(mcp.from_assistant(self.st, "198.51.100.9"))
+        self.assertFalse(mcp.from_assistant(self.st, "203.0.113.5"))
+
+    def test_a_removed_app_cant_sign_in(self):
+        mcp.save_apps(self.st, {"redirects": [CB]})
+        cid = mcp.register(self.st, {"redirect_uris": [CB]})["client_id"]
+        q = {"client_id": cid, "redirect_uri": CB, "response_type": "code", "code_challenge_method": "S256", "code_challenge": "c" * 43}
+        mcp.check_authorize(self.st, q)
+        mcp.save_apps(self.st, {"redirects": []})
+        with self.assertRaises(mcp.OAuthError):
+            mcp.check_authorize(self.st, q)
 
 
 if __name__ == "__main__":

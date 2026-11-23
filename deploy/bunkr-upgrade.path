@@ -1,0 +1,11 @@
+# BUNKR .deb installs: when an admin presses "Upgrade now", the web app (user bunkr) writes request.json here and
+# this root-owned unit starts bunkr-upgrade.service. The web app itself never gets root.
+[Unit]
+Description=Watch for a BUNKR upgrade request
+
+[Path]
+PathExists=/var/lib/bunkr/upgrade/request.json
+Unit=bunkr-upgrade.service
+
+[Install]
+WantedBy=paths.target

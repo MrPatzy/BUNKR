@@ -11,8 +11,8 @@ switched on separately:
 Where the AI runs (the "provider"):
 - "ollama": a model on your own computer through Ollama (free, nothing leaves your network).
 - "cli": a command-line AI tool on the hub that reads a prompt and prints a reply, with its tools switched off.
-  The hub's options say which command (--ai-cli; the default is Claude Code) and which login file (--ai-env-file,
-  default ai.env or claude.env next to the database).
+  The command is set on the hub, never from the web: the --ai-cli option, or a BUNKR_AI_CLI= line in the AI login
+  file (--ai-env-file, by default ai.env next to the database). None is set on a new install.
 
 The prompt and the reply are plain text. Headlines are other people's words, fenced in the prompt, never
 instructions; replies are parsed and checked, never run.
@@ -30,10 +30,24 @@ from pathlib import Path
 
 PROVIDERS = {"ollama": "A local model (Ollama)", "cli": "A command-line AI tool on the hub"}
 DEFAULT_OLLAMA = "http://127.0.0.1:11434"
-# the command-line tool: reads the prompt on stdin, prints the reply. The default is Claude Code with every tool off;
-# another tool works the same way (--ai-cli "llm -m mistral", --ai-cli "ollama run llama3.1"). Set by server.main.
-DEFAULT_CLI = "claude -p --tools '' --strict-mcp-config --no-session-persistence --output-format text"
+# the command-line tool: reads the prompt on stdin, prints the reply, e.g. "llm -m mistral" or "ollama run llama3.1".
+# None by default. Only the hub sets it (an admin web login must not pick a program the hub runs): --ai-cli, else
+# BUNKR_AI_CLI= in the login file. CLI holds the hub's options (server.main).
+DEFAULT_CLI = ""
 CLI = {"command": DEFAULT_CLI, "env_file": ""}
+# Names from earlier versions (up to 1.1), kept so an upgraded hub carries on as it was: its old option for the
+# tool's program, its login file and home folder, and the command it ran when none was set. New installs never use them.
+LEGACY_FLAG = "--claude"
+LEGACY_ENV = "claude.env"
+LEGACY_HOME = "claude-home"
+LEGACY_CLI = "claude -p --tools '' --strict-mcp-config --no-session-persistence --output-format text"
+
+
+def configure(command="", env_file="", legacy_program=""):
+    """The hub's options: --ai-cli COMMAND, --ai-env-file FILE, and the old option that named only the program."""
+    if not command and legacy_program:
+        command = shlex.join([legacy_program] + shlex.split(LEGACY_CLI)[1:])
+    CLI.update(command=command or DEFAULT_CLI, env_file=env_file or "")
 
 
 class AIOff(RuntimeError):
@@ -55,10 +69,48 @@ def settings(store):
     if not isinstance(s, dict):
         summaries, connector = _used_before(store)
         s = {"summaries": summaries, "connector": connector, "provider": "cli" if summaries else "ollama"}
+    if "command" not in s:
+        # saved by an earlier version, which ran its own default command: a hub that ran the tool keeps the one it ran.
+        # Only ever set here; the API can't change it.
+        s["command"] = LEGACY_CLI if s.get("provider") == "cli" else ""
         store.set_raw("ai", s)
     return {"summaries": bool(s.get("summaries")), "connector": bool(s.get("connector")),
             "provider": s.get("provider") if s.get("provider") in PROVIDERS else "ollama",
-            "ollama_url": str(s.get("ollama_url") or DEFAULT_OLLAMA), "model": str(s.get("model") or "llama3.1:8b")}
+            "ollama_url": str(s.get("ollama_url") or DEFAULT_OLLAMA), "model": str(s.get("model") or "llama3.1:8b"),
+            "command": str(s.get("command") or "")}
+
+
+ENV_KEY = "BUNKR_AI_CLI"   # the line in the login file that names the command (not passed on to the tool)
+
+
+def _login(store):
+    """The login file's lines as {name: value} ({} when there's none)."""
+    f = _env_file(store)
+    out = {}
+    if f:
+        for line in Path(f).read_text().splitlines():
+            if "=" in line and not line.lstrip().startswith("#"):
+                k, v = line.strip().split("=", 1)
+                out[k.strip()] = v.strip()
+    return out
+
+
+def command_source(store):
+    """(command, where it was set: "option", "login file", "earlier version" or "") - all on the hub side."""
+    if CLI["command"]:
+        return CLI["command"], "option"
+    c = _login(store).get(ENV_KEY, "")
+    if len(c) > 1 and c[0] == c[-1] and c[0] in "'\"":
+        c = c[1:-1]          # BUNKR_AI_CLI="llm -m mistral"
+    if c:
+        return c, "login file"
+    c = settings(store)["command"]
+    return c, "earlier version" if c else ""
+
+
+def command(store):
+    """The command-line tool to run ("" when none is set on the hub)."""
+    return command_source(store)[0]
 
 
 def save_settings(store, data):
@@ -80,6 +132,11 @@ def save_settings(store, data):
         if not re.fullmatch(r"[\w.\-:/]{1,80}", m):
             raise ValueError("the model name looks like llama3.1:8b")
         s["model"] = m
+    if "command" in data:
+        raise ValueError(f"the AI command is set on the hub (--ai-cli, or {ENV_KEY}= in ai.env), not here")
+    if "connector_apps" in data:
+        from . import mcp
+        mcp.save_apps(store, data["connector_apps"])
     store.set_raw("ai", s)
     return view(store)
 
@@ -88,16 +145,23 @@ def _env_file(store):
     if CLI["env_file"]:
         return CLI["env_file"]
     folder = Path(store.path).parent
-    for name in ("ai.env", "claude.env"):
+    for name in ("ai.env", LEGACY_ENV):   # the old name when there's no new one
         if (folder / name).exists():
             return str(folder / name)
     return ""
 
 
 def view(store):
+    from . import mcp
     s = settings(store)
-    return s | {"providers": PROVIDERS, "cli_found": bool(shutil.which(shlex.split(CLI["command"])[0])), "cli": shlex.split(CLI["command"])[0],
-                "cli_login": bool(_env_file(store)), "status": store.get_raw("ai_status", {}) or {}}
+    cmd, source = command_source(store)
+    try:
+        prog = shlex.split(cmd)[0] if cmd else ""
+    except ValueError:
+        prog = ""
+    return s | {"providers": PROVIDERS, "command": cmd, "command_source": source, "command_hint": f"--ai-cli, or {ENV_KEY}= in ai.env",
+                "cli_found": bool(prog and shutil.which(prog)), "cli": prog, "cli_login": bool(_env_file(store)),
+                "connector_apps": mcp.apps(store), "status": store.get_raw("ai_status", {}) or {}}
 
 
 def summaries_on(store):
@@ -122,20 +186,20 @@ def _ollama(s, prompt, timeout):
 
 
 def _cli(store, prompt, timeout):
-    """The command-line tool with every tool off: text in, text out."""
+    """The command-line tool: text in, text out (the command should switch the tool's own tools off)."""
     home = str(Path(store.path).parent / "ai-home")
-    if not os.path.isdir(home) and os.path.isdir(Path(store.path).parent / "claude-home"):
-        home = str(Path(store.path).parent / "claude-home")   # where earlier versions kept it
+    if not os.path.isdir(home) and os.path.isdir(Path(store.path).parent / LEGACY_HOME):
+        home = str(Path(store.path).parent / LEGACY_HOME)   # where earlier versions kept it
+    try:
+        cmd = shlex.split(command(store))     # run as a word list, never through a shell
+    except ValueError:
+        raise RuntimeError("the AI command set on the hub has an unmatched quote") from None
+    if not cmd:
+        raise RuntimeError(f"no AI command is set on the hub (--ai-cli, or {ENV_KEY}= in ai.env); or pick Ollama")
     os.makedirs(home, exist_ok=True)
     env = {k: v for k, v in os.environ.items() if k in ("PATH", "LANG", "LC_ALL", "TZ")}
     env["HOME"] = home
-    f = _env_file(store)
-    if f:
-        for line in open(f):
-            if "=" in line and not line.lstrip().startswith("#"):
-                k, v = line.strip().split("=", 1)
-                env[k] = v
-    cmd = shlex.split(CLI["command"])
+    env.update({k: v for k, v in _login(store).items() if k != ENV_KEY})
     try:
         r = subprocess.run(cmd, input=prompt, capture_output=True, text=True, timeout=timeout, env=env, cwd=home)
     except FileNotFoundError:

@@ -102,7 +102,8 @@ class BotTests(unittest.TestCase):
         for chat in ("got it", "home in 10", "have you eaten?", "used to be fine", "who is coming tonight", "add milk to the list"):
             self.assertIsNone(meshbot.parse(chat), chat)
         self.assertEqual(meshbot.parse("Who?"), ("who", ""))
-        self.assertTrue(self.ask("Alex", "?").startswith("BUNKR: SAFE/OMW/HELP"))
+        self.assertTrue(self.ask("Alex", "?").startswith("BUNKR 1/"))
+        self.assertIn("SAFE/OMW/HELP", self.ask("Alex", "?"))
         self.assertIn("Alex ?", self.ask("Alex", "WHO"))
         self.assertEqual(self.ask("Alex", "!have water"), "Drinking water 3 jugs (15 gal) @Garage")
         self.assertIn("Nothing called rifle", self.ask("Alex", "!have rifle"))  # never firearms
@@ -150,7 +151,7 @@ class BotTests(unittest.TestCase):
         # HELP is always a check-in, never the command list
         self.assertTrue(mesh.handle(self.st, {"kind": "channel", "channel": 7, "text": "Alex: help"}, self.s, self.ctx).startswith("Got it: Alex needs help"))
         # the trusted group gets the basic commands only: no inventory, no Home Assistant
-        self.assertIn("WHO ALERTS", mesh.handle(self.st, {"kind": "channel", "channel": 2, "text": "Alex: ?"}, self.s, self.ctx))
+        self.assertIn("WHO, ALERTS", mesh.handle(self.st, {"kind": "channel", "channel": 2, "text": "Alex: ?"}, self.s, self.ctx))
         self.assertIn("Alex", mesh.handle(self.st, {"kind": "channel", "channel": 2, "text": "Riley: who"}, self.s, self.ctx))
         for cmd in ("!have water", "!add 1 tarp", "!home lights", "ready"):
             self.assertIsNone(mesh.handle(self.st, {"kind": "channel", "channel": 2, "text": "Alex: " + cmd}, self.s, self.ctx), cmd)

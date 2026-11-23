@@ -127,6 +127,50 @@ This keeps `/etc/bunkr/firewall.nft` exactly as it is, and keeps the `--allow-ho
 
 ---
 
+## 4. Install with the .deb (Debian or Ubuntu, BUNKR only)
+
+Each release also comes as a package, `bunkr_X.Y.Z_all.deb`, with `SHA256SUMS` and `SHA256SUMS.sig`. The package
+installs BUNKR itself and nothing else: no hotspot, offline libraries, maps or radio programs (use the installer
+above for a Pi or laptop node). A machine installed from the .deb can be upgraded from the Household tab
+("Upgrade now").
+
+1. Download the three files from the release page into one folder and check them:
+   ```
+   sha256sum -c SHA256SUMS
+   ```
+2. Install (this also installs Python, `python3-cryptography`, 7-Zip and `rsync` if they're missing):
+   ```
+   sudo apt install ./bunkr_X.Y.Z_all.deb
+   ```
+3. Set the options in `/etc/default/bunkr`. Out of the box BUNKR only answers on the machine itself
+   (`--bind 127.0.0.1`). To reach it from your network, set `--bind 0.0.0.0`, add `--allow-host` for each name or
+   address people type, and firewall port 8765 (`deploy/firewall.nft` is an example). Then
+   `sudo systemctl restart bunkr`.
+4. Create your login:
+   ```
+   sudo -u bunkr bunkr --db /var/lib/bunkr/bunkr.db user add YOURNAME --admin
+   ```
+5. Keep the .deb you installed from in `/var/lib/bunkr-upgrade/debs/` (`sudo install -m 600 bunkr_X.Y.Z_all.deb
+   /var/lib/bunkr-upgrade/debs/`). The first upgrade from the Household tab uses it to go back if something goes
+   wrong; without it, it downloads the same version again from the release page.
+
+The app goes in `/usr/lib/bunkr`, its data in `/var/lib/bunkr`. `sudo apt remove bunkr` keeps the data;
+`sudo apt purge bunkr` deletes `/var/lib/bunkr` too (database, store and backups).
+
+The package won't install over a BUNKR that is a git checkout in `/opt/bunkr` or was set up by `deploy/install.sh`;
+those keep upgrading the way they were installed.
+
+### Moving to the .deb
+
+A hub set up with `deploy/install.sh` can move to the package and keep its data:
+1. Back up (snapshot, or copy `/var/lib/bunkr`).
+2. Note the options after `--db ...` on the `ExecStart` line of `/etc/systemd/system/bunkr.service`.
+3. `sudo systemctl disable --now bunkr` and `sudo mv /etc/systemd/system/bunkr.service ~/bunkr.service.old`.
+4. Install the .deb as above, put the options you noted into `BUNKR_ARGS` in `/etc/default/bunkr`, and
+   `sudo systemctl restart bunkr`. Your logins and data are where they were. Remove `/opt/bunkr` when it works.
+
+---
+
 ## Options
 
 | Option | Meaning |
@@ -162,11 +206,31 @@ it there. "Lock now" on the node's Home screen locks it by hand (admins). If a n
 holds. On SD cards and SSDs, the old plain database may linger in unused blocks until they're reused; for a node
 that already held data, the safest path is a fresh install with `--lock`.
 
+## Optional AI on the hub
+
+AI is off until an admin turns it on in the "AI (optional)" card on the Household tab. To use a free local model,
+pick Ollama there and give its address. To use a command-line AI tool on the hub instead, set its command on the hub
+itself (the web page only shows it, so a web login can never choose a program the hub runs). Either:
+
+- add a line to `/var/lib/bunkr/ai.env` (mode 600, owned by `bunkr`; any other `NAME=value` lines there, such as the
+  tool's login token, are passed to the tool):
+  ```
+  BUNKR_AI_CLI=llm -m mistral
+  ```
+- or start BUNKR with `--ai-cli "llm -m mistral"` (this wins over `ai.env`).
+
+The command must read the prompt on standard input and print the reply; it is run directly, never through a shell.
+Switch off the tool's own tools or plugins if it has any. BUNKR reads `ai.env` each time it uses AI, so no restart
+is needed. To let an AI app use the AI connector (MCP), list its sign-in callback addresses (and
+its web addresses, and optionally its server networks) on the same card.
+
 ## What goes where
 
 | Path | What |
 | --- | --- |
-| `/opt/bunkr` | The app (copied from the folder you ran the installer from) |
+| `/opt/bunkr` | The app (copied from the folder you ran the installer from). From the .deb: `/usr/lib/bunkr`, options in `/etc/default/bunkr` |
+| `/var/lib/bunkr/upgrade`, `/var/lib/bunkr-upgrade` | .deb installs: upgrade requests from the app; the upgrader's status, log and the last few `.deb`s (root only) |
+| `/var/lib/bunkr/store/bunkr-releases` | Signed releases for upgrading with no internet |
 | `/var/lib/bunkr/bunkr.db` | BUNKR's database |
 | `/var/lib/bunkr/store/library` | Offline libraries (`*.zim`). Kiwix picks up new files by itself |
 | `/var/lib/bunkr/store/maps` | Map files (`*.pmtiles`) |
@@ -175,7 +239,7 @@ that already held data, the safest path is a fresh install with `--lock`.
 | `/etc/bunkr/node.token` | Pairing token from the hub |
 | `/etc/bunkr/firewall.nft` | Firewall rules (rewritten by each run on the Pi and laptop) |
 | `/var/cache/bunkr/downloads` | Verified downloads, reused on the next run |
-| `/var/lib/bunkr/db-backups` | Database copies: nightly at 2 am (`bunkr-nightly-*`, 14 kept), before each deploy and schema change. A restore test of the newest runs monthly; the result is on Home for admins. These stay on the same machine, so keep Proxmox backups of the container too |
+| `/var/lib/bunkr/db-backups` | Database copies: nightly at 2 am (`bunkr-nightly-*`: the newest 14 plus the first of each month for 12 months), before each deploy (`bunkr-before-deploy-*`, newest 10) and by hand (never pruned). Change the numbers on Downloads > Space used. A restore test of the newest runs monthly; the result is on Home for admins. These stay on the same machine, so keep Proxmox backups of the container too |
 | `/var/lib/bunkr/vapid.pem`, `ai.env` (optional AI), `firms.key`, `cloudflare-radar.token`, `mfa.key`, `vault.key` (hub) | Secrets in files (mode 600), never in the database, its backups or sync: the phone-notification key, the optional AI tool's login, the optional Situation source keys (entered on the Situation tab), the hub's node-lock key, and the key that seals authenticator-app secrets (back it up with the container: without it, codes stop working and people log in with a passkey or a recovery code, or an admin turns two-step off for them) |
 
 Services: `bunkr` (port 8765), `bunkr-kiwix` (port 8080; Pi and laptop. On the hub BUNKR runs Kiwix itself on
@@ -233,10 +297,36 @@ Also installed from their official releases with a checked SHA-256: **Pat** (Win
 
 ## Upgrading
 
-BUNKR never updates itself. Once a day the hub asks the project's GitHub page for its latest release and, when
+BUNKR never updates on its own. Once a day the hub asks the project's GitHub page for its latest release and, when
 there's a newer one, admins get a note (the bell, and a push or email by their settings). The Household tab shows
 what's new. You choose when, or whether, to upgrade; "Skip this version" quiets that one, and the check can be
 turned off there.
+
+### Installed from the .deb: "Upgrade now"
+
+On a machine installed from the .deb, admins see **Upgrade now** on the Household tab when a newer signed release
+is out. Pressing it:
+1. BUNKR (which runs as the unprivileged `bunkr` user) leaves a request in `/var/lib/bunkr/upgrade/`. It never
+   gets root itself.
+2. `bunkr-upgrade.path` notices and starts `bunkr-upgrade.service` (root). It checks every field of the request,
+   downloads that release's `.deb`, `SHA256SUMS` and `SHA256SUMS.sig`, and checks the signature with the release
+   key built into the BUNKR you have, and the `.deb` against the signed checksum. Anything unsigned, wrongly
+   signed, older, or from another repository is refused and nothing changes.
+3. It backs up the database to `/var/lib/bunkr/db-backups/bunkr-before-upgrade-*.db` (newest 10 kept), installs
+   the new `.deb`, restarts BUNKR and checks it answers.
+4. If BUNKR doesn't come back, it reinstalls the previous `.deb` and puts the database backup back.
+
+The card shows "Upgrading…", then "Upgraded to X.Y.Z" or "Rolled back: why". A new MAJOR version asks you to
+confirm twice. Details are in `/var/lib/bunkr-upgrade/upgrade.log`; `sudo /usr/lib/bunkr/bunkr-upgrade --status`
+prints the last result. To take releases from your own fork instead, set `BUNKR_UPGRADE_REPO=owner/name` in
+`/etc/default/bunkr` (its releases must still be signed with the key in your BUNKR).
+
+**With no internet** (a field node): copy a release's three files into `/var/lib/bunkr/store/bunkr-releases/`
+(from a USB stick, for example). When they're signed and newer, the card offers "Upgrade now" from that copy.
+
+By hand, the same thing: `sudo apt install ./bunkr_X.Y.Z_all.deb` after `sha256sum -c SHA256SUMS`.
+
+### Installed with deploy/install.sh
 
 To upgrade a machine:
 1. Back up: snapshot the machine or container if you can, or at least copy `/var/lib/bunkr`. BUNKR also keeps
@@ -246,13 +336,16 @@ To upgrade a machine:
    same role and options you installed with (`--role pi`, `--role laptop`, `--hub-url ...`).
 4. BUNKR restarts; the database is updated on the first start. Upgrade the hub first, then the nodes.
 
+A hub that runs from a git checkout with auto-deploy (below) updates from git, so its Household card says
+"This hub updates from git" instead of offering the button.
+
 Versions are numbered MAJOR.MINOR.PATCH. A new MAJOR may need a step by hand; its release notes say so.
 
 ## Auto-deploy on the hub
 
 Merged pull requests go live by themselves. `bunkr-deploy.timer` runs `/usr/local/sbin/bunkr-autodeploy` (a root-owned
 copy of `deploy/autodeploy.sh`) every 2 minutes. When `main` moves it tests the new commit as the `bunkr` user, backs up
-the database to `/var/lib/bunkr/db-backups/bunkr-before-deploy-*.db` (newest 10 kept), fast-forwards `/opt/bunkr`,
+the database to `/var/lib/bunkr/db-backups/bunkr-before-deploy-*.db` (newest 10 kept, or the number set on Downloads > Space used), fast-forwards `/opt/bunkr`,
 restarts BUNKR and checks it answers. If tests fail nothing changes; if BUNKR doesn't come back, code and database
 are rolled back. Either way it comments on the merged pull request. Log: `/var/lib/bunkr-deploy/deploy.log`.
 It skips while `/opt/bunkr` has uncommitted or unpushed changes. To update the script itself after a change, run

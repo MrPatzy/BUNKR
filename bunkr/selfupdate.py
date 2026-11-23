@@ -1,9 +1,11 @@
 """Is there a newer BUNKR? A once-a-day look at the project's latest GitHub release, and a note to admins.
 
-BUNKR never updates itself and never sends anything about this install: the check is one anonymous request for
+BUNKR never updates on its own and never sends anything about this install: the check is one anonymous request for
 public release information (GitHub sees the hub's address, as with any download). Admins choose when to upgrade,
 can skip a version, or turn the check off. Each new version is announced once, to admins, through the usual
 channels (the bell, and a push or email by their settings), with the release notes on the Household tab.
+On a .deb install the check also fetches the release's signed checksums, so an admin can press "Upgrade now"
+(bunkr/upgrader.py does the rest, as root, outside the web service).
 """
 
 import json
@@ -66,9 +68,11 @@ def view(store):
     s = settings(store)
     latest = store.get_raw("selfupdate_latest", {}) or {}
     avail = bool(latest.get("version") and newer(latest["version"], __version__))
+    from . import upgrader
     return {"current": __version__, "enabled": s["enabled"], "repo": s["repo"], "skip": s["skip"], "latest": latest,
             "available": avail, "skipped": avail and latest.get("version") == s["skip"],
-            "checked_at": store.get_raw("selfupdate_checked", "") or "", "error": store.get_raw("selfupdate_error", "") or ""}
+            "checked_at": store.get_raw("selfupdate_checked", "") or "", "error": store.get_raw("selfupdate_error", "") or "",
+            "upgrade": upgrader.upgrade_view(latest, s["repo"])}
 
 
 def check(store, opener=None):
@@ -92,6 +96,12 @@ def check(store, opener=None):
         return view(store)
     latest = {"version": version.lstrip("v"), "name": str(d.get("name") or "")[:120], "notes": str(d.get("body") or "")[:6000],
               "url": str(d.get("html_url") or "")[:300], "published_at": str(d.get("published_at") or "")[:25]}
+    from . import upgrader
+    if newer(latest["version"], __version__) and upgrader.install_kind() == "deb":
+        try:
+            latest["deb"] = upgrader.release_deb(d, latest["version"], opener)
+        except Exception as exc:          # unsigned, wrongly signed or unreachable: no Upgrade button, say why
+            latest["deb_error"] = f"{exc}"[:200]
     store.set_raw("selfupdate_latest", latest)
     store.set_raw("selfupdate_checked", _now())
     store.set_raw("selfupdate_error", "")

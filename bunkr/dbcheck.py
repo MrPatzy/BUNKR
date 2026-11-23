@@ -1,8 +1,8 @@
 """Nightly database copies, and a monthly proof that the newest copy actually restores.
 
 The copy uses SQLite's online backup, so it is consistent even while BUNKR is writing. It lands in `db-backups/`
-next to the database (the same folder the deploy and schema-change copies use) as bunkr-nightly-YYYYMMDD.db; the
-newest 14 are kept. Secrets that live in files next to the database (the push key, the AI login file, source keys)
+next to the database (the same folder the deploy and schema-change copies use) as bunkr-nightly-YYYYMMDD.db. How many
+are kept (the newest 14 plus one a month for 12 months, by default) is up to retention.py, run after the restore test. Secrets that live in files next to the database (the push key, the AI login file, source keys)
 are not in it, on purpose.
 
 The restore test opens a throwaway copy of the newest backup, checks it, upgrades it to this code's schema the same
@@ -16,7 +16,6 @@ import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-KEEP = 14
 TEST_EVERY_DAYS = 30
 TABLES = ("items", "locations", "people", "sites", "contacts", "channels", "checkins", "documents")
 
@@ -29,8 +28,8 @@ def folder(store):
     return Path(store.path).parent / "db-backups"
 
 
-def nightly_copy(store, when=None, keep=KEEP):
-    """Write tonight's copy (once a day) and prune old nightly copies. Returns the path."""
+def nightly_copy(store, when=None):
+    """Write tonight's copy (once a day). Returns the path. Old copies are pruned by retention.prune_backups."""
     d = folder(store)
     d.mkdir(parents=True, exist_ok=True)
     day = (when or datetime.now()).strftime("%Y%m%d")
@@ -45,8 +44,6 @@ def nightly_copy(store, when=None, keep=KEEP):
                 out.close()
         tmp.chmod(0o640)
         tmp.replace(dest)
-    for old in sorted(d.glob("bunkr-nightly-*.db"))[:-keep]:
-        old.unlink(missing_ok=True)
     store.set_raw("db_backup_last", {"at": now(), "file": dest.name, "bytes": dest.stat().st_size})
     return dest
 
@@ -116,10 +113,12 @@ def due(store, at=None):
 
 
 def nightly(store):
-    """The scheduled job: tonight's copy, then the restore test when it's due."""
+    """The scheduled job: tonight's copy, the restore test when it's due, then old copies pruned."""
+    from . import retention
     nightly_copy(store)
     if due(store):
         restore_test(store)
+    retention.prune_backups(store, folder(store))
 
 
 def status(store, at=None):

@@ -86,6 +86,8 @@ def _item(source, uid, category, tier, title, **kw):
             "starts": "", "ends": "", "scenario": "", "trust": "official", "geom": ""}
     base.update({k: v for k, v in kw.items() if k in base})
     base["summary"] = (base["summary"] or "")[:1200]
+    url = str(base["url"] or "").strip()
+    base["url"] = url if url.lower().startswith(("https://", "http://")) else ""  # a feed's link becomes a link in the app
     return base
 
 

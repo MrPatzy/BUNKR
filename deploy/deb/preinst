@@ -1,0 +1,18 @@
+#!/bin/sh
+# BUNKR .deb: refuse to install over a BUNKR that is managed another way. Changes nothing.
+set -e
+
+if [ "$1" = install ]; then
+	if [ -e /opt/bunkr/.git ] || [ -e /etc/systemd/system/bunkr-deploy.timer ]; then
+		echo "bunkr: this machine runs BUNKR from a git checkout in /opt/bunkr, updated from git." >&2
+		echo "bunkr: keep updating it that way; the .deb is not for it. Nothing was changed." >&2
+		exit 1
+	fi
+	if [ -f /etc/systemd/system/bunkr.service ] && ! grep -q /usr/lib/bunkr /etc/systemd/system/bunkr.service; then
+		echo "bunkr: BUNKR is already installed here by deploy/install.sh (/etc/systemd/system/bunkr.service)." >&2
+		echo "bunkr: see \"Moving to the .deb\" in deploy/INSTALL.md. Nothing was changed." >&2
+		exit 1
+	fi
+fi
+
+exit 0

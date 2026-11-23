@@ -1,0 +1,10 @@
+# Options for BUNKR from the .deb (bunkr.service). After changing them: sudo systemctl restart bunkr
+#
+# BUNKR_ARGS is added to: python3 -m bunkr --db /var/lib/bunkr/bunkr.db --no-browser
+# Out of the box BUNKR only answers on this machine (127.0.0.1). To reach it from your network, set --bind 0.0.0.0,
+# add --allow-host for each name or address people type, and firewall port 8765 (see deploy/INSTALL.md).
+# A field node also takes --role pi (or laptop) and --hub-url http://HUB-ADDRESS:8765.
+BUNKR_ARGS="--role hub --bind 127.0.0.1 --port 8765 --require-login"
+
+# The GitHub repository (owner/name) the Upgrade button installs signed releases from. Empty: the project's own.
+#BUNKR_UPGRADE_REPO=""

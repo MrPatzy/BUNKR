@@ -1,0 +1,16 @@
+#!/bin/sh
+# BUNKR .deb: stop the services on removal (not on upgrade: the upgrader itself may be what is running this).
+set -e
+
+case "$1" in
+remove|deconfigure)
+	if [ -d /run/systemd/system ]; then
+		systemctl stop bunkr-upgrade.path bunkr.service >/dev/null 2>&1 || true
+		systemctl disable bunkr.service bunkr-upgrade.path >/dev/null 2>&1 || true
+	fi
+	;;
+esac
+# compiled files made by postinst
+find /usr/lib/bunkr -depth -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+
+exit 0

@@ -1,0 +1,14 @@
+# Runs one BUNKR upgrade as root: checks the request, fetches the signed release (GitHub or the store copy),
+# verifies the signature and checksum, backs up the database, installs the .deb, restarts BUNKR, checks it answers,
+# and goes back to the previous .deb and database if it doesn't. Status: /var/lib/bunkr-upgrade/status.json.
+[Unit]
+Description=Upgrade BUNKR from a signed release
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/default/bunkr
+ExecStart=/usr/lib/bunkr/bunkr-upgrade
+TimeoutStartSec=30min
+PrivateTmp=yes

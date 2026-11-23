@@ -3,8 +3,9 @@
 Off until an admin turns it on (ai.py, Household tab). The AI app reaches /mcp from its maker's servers, so this
 path (and /.well-known) bypasses Cloudflare Access; BUNKR's own sign-in protects it instead. Users sign in with
 their BUNKR login on BUNKR's approval page; the app gets a short-lived access token and a refresh token.
-Only apps whose sign-in callback and server addresses are listed below can connect; today that's Claude's
-(the one app that publishes both). Others can be added to ASSISTANTS.
+Only AI apps the admin lists on the AI card can connect (apps()): their exact sign-in callback addresses, their web
+addresses, and optionally the networks their servers connect from. A new install lists none; an install upgraded
+from 1.1 keeps the apps already signed in. Nothing is wildcarded: callbacks match exactly, origins are https only.
 
 What the assistant may do is deliberately narrow: add, edit and move inventory items; read inventory,
 readiness, the shopping list, maintenance tasks and the radio channel plan; mark tasks done;
@@ -16,20 +17,13 @@ import base64
 import hashlib
 import html
 import json
+import re
 import secrets
 from datetime import datetime, timedelta, timezone
 from urllib.parse import parse_qs, urlencode, urlparse
 
 PROTOCOL_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")
-# AI apps that may connect: their sign-in callbacks and the addresses their servers connect from (checked against
-# Cloudflare's CF-Connecting-IP when present). Claude: claude.com/docs/connectors/building/authentication
-ASSISTANTS = {
-    "claude": {"redirects": {"https://claude.ai/api/mcp/auth_callback", "https://claude.com/api/mcp/auth_callback"},
-               "origins": {"https://claude.ai", "https://claude.com"}, "egress": ["160.79.104.0/21"]},
-}
-ALLOWED_REDIRECTS = set().union(*(a["redirects"] for a in ASSISTANTS.values()))
-ALLOWED_ORIGINS = set().union(*(a["origins"] for a in ASSISTANTS.values()))
-EGRESS = [n for a in ASSISTANTS.values() for n in a["egress"]]
+MAX_LISTED = 20   # of each kind on the connector's app list
 ACCESS_TTL = timedelta(hours=1)
 REFRESH_TTL = timedelta(days=60)
 CODE_TTL = timedelta(minutes=10)
@@ -72,25 +66,110 @@ def auth_server(base):
 
 # ---------------- clients (dynamic registration) ----------------
 
-def _redirect_ok(uri):
-    return uri in ALLOWED_REDIRECTS
+# ---------------- which AI apps may connect (admin list, AI card) ----------------
+
+_HOST = r"[a-z0-9](?:[a-z0-9\-]{0,62}\.)*[a-z0-9\-]{1,63}(?::\d{1,5})?"
 
 
-def from_assistant(cf_ip):
-    """True when the request didn't come through Cloudflare (LAN) or came from a listed AI app's servers."""
-    if not cf_ip:
+def _redirect(u):
+    """An exact https callback address (no wildcards, user names or fragments), or ValueError."""
+    u = str(u or "").strip()
+    p = urlparse(u)
+    if (len(u) > 300 or p.scheme != "https" or not re.fullmatch(_HOST, p.netloc) or p.fragment or "*" in u
+            or not re.fullmatch(r"[\w\-./~%]*", p.path) or not re.fullmatch(r"[\w\-.=&%]*", p.query)):
+        raise ValueError(f"a sign-in callback is a full https address, like https://app.example/oauth/callback ({u[:60]})")
+    return u
+
+
+def _origin(u):
+    u = str(u or "").strip().rstrip("/").lower()
+    p = urlparse(u)
+    if p.scheme != "https" or not re.fullmatch(_HOST, p.netloc) or u != f"https://{p.netloc}":
+        raise ValueError(f"an app's web address is https:// and a name, like https://app.example ({u[:60]})")
+    return u
+
+
+def _network(n):
+    import ipaddress
+    try:
+        net = ipaddress.ip_network(str(n or "").strip(), strict=False)
+    except ValueError:
+        raise ValueError(f"a server network looks like 203.0.113.0/24 ({str(n)[:40]})") from None
+    if net.prefixlen < (8 if net.version == 4 else 16):
+        raise ValueError(f"{net} is too wide: list the AI app's own networks")
+    return str(net)
+
+
+def _clean(data, key, check):
+    v = data.get(key) or []
+    if isinstance(v, str):
+        v = v.split()
+    if not isinstance(v, list):
+        raise ValueError("send a list")
+    out = sorted({check(x) for x in v if str(x).strip()})
+    if len(out) > MAX_LISTED:
+        raise ValueError(f"list at most {MAX_LISTED}")
+    return out
+
+
+def _seed(store):
+    """An install from before the list was a setting: keep the apps already signed up (their callbacks were checked)."""
+    uris = set()
+    for c in store._rows("SELECT redirect_uris FROM mcp_clients"):
+        for u in json.loads(c["redirect_uris"] or "[]"):
+            try:
+                uris.add(_redirect(u))
+            except ValueError:
+                pass
+    return {"redirects": sorted(uris), "origins": sorted({_origin(f"https://{urlparse(u).netloc}") for u in uris}), "egress": []}
+
+
+def apps(store):
+    """The AI apps that may connect: {"redirects": [...], "origins": [...], "egress": [...]} (egress empty = not checked)."""
+    a = store.get_raw("mcp_apps", None)
+    if not isinstance(a, dict):
+        a = _seed(store)
+        store.set_raw("mcp_apps", a)
+    return {k: [str(x) for x in a.get(k) or []] for k in ("redirects", "origins", "egress")}
+
+
+def save_apps(store, data):
+    if not isinstance(data, dict):
+        raise ValueError("send the connector's app list")
+    a = apps(store)
+    for key, check in (("redirects", _redirect), ("origins", _origin), ("egress", _network)):
+        if key in data:
+            a[key] = _clean(data, key, check)
+    store.set_raw("mcp_apps", a)
+    return a
+
+
+def origins(store):
+    """Web addresses a listed app's pages may come from: its own, plus its callbacks' (the sign-in form posts there)."""
+    a = apps(store)
+    return sorted(set(a["origins"]) | {f"https://{urlparse(u).netloc}" for u in a["redirects"]})
+
+
+def _redirect_ok(store, uri):
+    return uri in apps(store)["redirects"]
+
+
+def from_assistant(store, cf_ip):
+    """True when the request didn't come through Cloudflare (LAN), no server networks are listed, or it came from one."""
+    egress = apps(store)["egress"]
+    if not cf_ip or not egress:
         return True
     import ipaddress
     try:
         ip = ipaddress.ip_address(cf_ip.strip())
-        return any(ip in ipaddress.ip_network(n) for n in EGRESS)
+        return any(ip in ipaddress.ip_network(n) for n in egress)
     except ValueError:
         return False
 
 
 def register(store, body):
     uris = body.get("redirect_uris") or []
-    if not isinstance(uris, list) or not uris or not all(isinstance(u, str) and _redirect_ok(u) for u in uris):
+    if not isinstance(uris, list) or not uris or not all(isinstance(u, str) and _redirect_ok(store, u) for u in uris):
         raise OAuthError("invalid_redirect_uri", "only a listed AI app's own callback addresses can register")
     method = body.get("token_endpoint_auth_method", "none")
     if method != "none":
@@ -128,6 +207,8 @@ def check_authorize(store, q):
     ru = q.get("redirect_uri") or (c["redirect_uris"][0] if len(c["redirect_uris"]) == 1 else "")
     if ru not in c["redirect_uris"]:
         raise OAuthError("invalid_request", "redirect address doesn't match the registered one")
+    if not _redirect_ok(store, ru):
+        raise OAuthError("invalid_request", "this AI app isn't on the connector's list (AI card, Household tab)")
     if q.get("response_type") != "code":
         raise OAuthError("unsupported_response_type", "response_type must be code")
     if q.get("code_challenge_method") != "S256" or not q.get("code_challenge"):

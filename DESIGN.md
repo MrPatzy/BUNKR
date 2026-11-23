@@ -23,8 +23,11 @@
 - **Off by default:** a new install uses no AI anywhere, and every feature works without it.
 - **One switch:** the "AI (optional)" card on the Household tab turns on, separately, AI summaries (the morning brief's
   write-ups and sorting news stories by place and topic) and the AI connector (MCP). Nothing else uses AI.
-- **Where it runs:** a local model through Ollama (free, stays on your network), or a command-line AI tool on the hub
-  (`--ai-cli`). All of it goes through `bunkr/ai.py`.
+- **Where it runs:** a local model through Ollama (free, stays on your network), or any command-line AI tool on the hub,
+  whose command is set only on the hub (`--ai-cli`, or `BUNKR_AI_CLI=` in `ai.env`), never from the web. No tool is
+  assumed. All of it goes through `bunkr/ai.py`.
+- **Which apps may connect:** the admin lists them on the card (exact https sign-in callbacks, their web addresses,
+  optionally their server networks); none on a new install. No wildcards.
 - **Safety:** text in, text out. Headlines are fenced as other people's words; replies are parsed and checked, never run.
   The connector is narrow (`bunkr/mcp_tools.py`): no firearms, no deleting what it didn't add, every change undoable.
 

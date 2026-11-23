@@ -22,6 +22,7 @@ TILES = [
     ("sendcall", "Send a family call", "caller"),
     ("push", "Notifications on this phone", "all"),
     ("backup", "Backups", "admin"),
+    ("hub", "Hub computer", "admin"),
 ]
 TILE_IDS = [t[0] for t in TILES]
 BUILT_IN = {"order": TILE_IDS, "hidden": [], "collapsed": ["push", "lastcall"]}

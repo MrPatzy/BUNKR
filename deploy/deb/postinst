@@ -1,0 +1,42 @@
+#!/bin/sh
+# BUNKR .deb: the bunkr user, its folders and the services. Safe to run again; never touches existing data.
+set -e
+
+# make a folder only if it isn't there yet; an existing one keeps its owner and mode
+mkd() {
+	[ -d "$4" ] || install -d -m "$1" -o "$2" -g "$3" "$4"
+}
+
+if [ "$1" = configure ]; then
+	if ! getent passwd bunkr >/dev/null; then
+		useradd --system --user-group --home-dir /var/lib/bunkr --no-create-home --shell /usr/sbin/nologin bunkr
+	fi
+	mkd 0750 bunkr bunkr /var/lib/bunkr
+	mkd 0755 bunkr bunkr /var/lib/bunkr/store
+	for sub in library tools maps firmware radio web web/maps bunkr-releases; do
+		mkd 0755 bunkr bunkr "/var/lib/bunkr/store/$sub"
+	done
+	mkd 0750 bunkr bunkr /var/lib/bunkr/db-backups
+	mkd 0750 bunkr bunkr /var/lib/bunkr/upgrade
+	mkd 0755 root root /var/lib/bunkr-upgrade
+	mkd 0700 root root /var/lib/bunkr-upgrade/debs
+
+	python3 -m compileall -q /usr/lib/bunkr/bunkr >/dev/null 2>&1 || true
+
+	if [ -d /run/systemd/system ]; then
+		systemctl daemon-reload || true
+		if [ -z "$2" ]; then
+			# first install: switch the services on
+			systemctl enable bunkr.service bunkr-upgrade.path >/dev/null 2>&1 || true
+			systemctl start bunkr.service bunkr-upgrade.path || true
+		else
+			# upgrade: restart what was running, leave alone what an admin switched off
+			systemctl try-restart bunkr.service || true
+			if systemctl is-enabled -q bunkr-upgrade.path 2>/dev/null; then
+				systemctl start bunkr-upgrade.path || true
+			fi
+		fi
+	fi
+fi
+
+exit 0

@@ -15,7 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from bunkr import auth, checkins, dbcheck, field, notify  # noqa: E402
+from bunkr import auth, checkins, dbcheck, field, notify, retention  # noqa: E402
 from bunkr.db import SCHEMA_VERSION, Store  # noqa: E402
 from tests import test_phase3 as p3  # noqa: E402
 
@@ -112,11 +112,14 @@ class BackupTests(unittest.TestCase):
         d = dbcheck.folder(self.store)
         for n in range(1, 18):
             dbcheck.nightly_copy(self.store, when=datetime(2026, 10, n))
+        retention.prune_backups(self.store, d, now=datetime(2026, 10, 18))  # what the nightly job does after the copy
         names = sorted(p.name for p in d.glob("bunkr-nightly-*.db"))
-        self.assertEqual(len(names), dbcheck.KEEP)
+        self.assertEqual(len(names), 14 + 1)  # the newest 14, and the month's first copy
+        self.assertEqual(names[0], "bunkr-nightly-20261001.db")
         self.assertEqual(names[-1], "bunkr-nightly-20261017.db")
-        (d / "bunkr-before-deploy-x.db").write_bytes(b"")  # other copies are never pruned here
+        (d / "bunkr-before-deploy-x.db").write_bytes(b"")  # copies it can't classify are never pruned
         dbcheck.nightly_copy(self.store, when=datetime(2026, 10, 18))
+        retention.prune_backups(self.store, d, now=datetime(2026, 10, 18))
         self.assertTrue((d / "bunkr-before-deploy-x.db").exists())
         self.assertEqual(stat.S_IMODE(os.stat(d / names[-1]).st_mode), 0o640)
         c = sqlite3.connect(d / names[-1])

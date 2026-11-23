@@ -277,6 +277,7 @@ function renderHome() {
   }
   if (!renderLastCall(call)) empty.add("lastcall");
   if (!renderBackupStatus()) empty.add("backup");
+  if (!renderHostStatus()) empty.add("hub");
   const md = S.med_due || [];
   if (!md.length) empty.add("med");
   $("#home-med").replaceChildren(...md.map((d) => h("p", {}, h("strong", { class: d.kind === "out" ? "bad" : "" }, d.text))),
@@ -303,12 +304,10 @@ function renderHome() {
       h("span", { class: "meta" }, bits.join(" · "),
         l && l.lat != null ? [" · ", h("a", { href: mapLink(l), target: "_blank", rel: "noopener" }, "map")] : null,
         p.waiting ? h("span", { class: "waiting" }, (bits.length ? " · " : "") + "hasn't answered the call") : null,
-        S.can_call && (!me || p.uid !== me.uid) ? [bits.length || p.waiting ? " · " : "", h("button", { class: "link", onclick: () => {
-          const st = prompt(`Check ${p.name} in as: safe, moving, or help?`, "safe");
-          const key = { safe: "safe", moving: "moving", "on my way": "moving", help: "help", "need help": "help" }[(st || "").trim().toLowerCase()];
-          if (st && !key) return toast("Type safe, moving or help", true);
-          if (key) checkIn(p.uid, key, true);
-        } }, "check in for them")] : null),
+        S.can_call && (!me || p.uid !== me.uid) ? [bits.length || p.waiting ? " · " : "", h("button", { class: "link", "aria-expanded": String(FOR_OTHER.uid === p.uid),
+          onclick: () => { FOR_OTHER = FOR_OTHER.uid === p.uid ? {} : { uid: p.uid, note: "", flight: "" }; renderHome(); } },
+          FOR_OTHER.uid === p.uid ? "close" : "check in for them")] : null),
+      FOR_OTHER.uid === p.uid ? checkInForPanel(p, b.statuses) : null,
       flightOf[p.uid] ? flightBlock(flightOf[p.uid]) : null);
   }));
   const a = S.analysis;
@@ -375,6 +374,17 @@ function renderBackupStatus() {
     h("button", { onclick: (e) => { e.target.disabled = true; guarded(async () => {
       const r = await api("POST", "backups-check"); toast(r.ok ? "Backed up and restore-tested: passed" : "Restore test failed: " + r.problem, !r.ok); refresh(); }); } },
       "Back up and test now"));
+  return true;
+}
+// The hub computer on Home: admins only, and only when it needs a restart or security updates are waiting.
+function renderHostStatus() {
+  const card = $("#hub-card"), s = S.host_status;
+  if (!s || !s.attention || S.view === "simple") return false;
+  card.replaceChildren(
+    s.reboot ? h("p", { class: "warn" }, h("strong", {}, "Restart needed"), s.since ? ` since ${sinceIso(s.since)}` : "",
+      ". Security updates were installed; restart the hub computer when it suits you. BUNKR never does it.") : null,
+    s.packages && s.packages.length ? h("p", { class: "muted" }, "Asked for by: " + s.packages.join(", ")) : null,
+    s.security ? h("p", {}, `${s.security} security update${s.security === 1 ? "" : "s"} waiting to install.`) : null);
   return true;
 }
 /* ---------- Home tiles: each person's order, hidden and folded tiles; they float into columns on wider screens ---------- */
@@ -530,9 +540,28 @@ $("#call-form").addEventListener("submit", (e) => {
   guarded(async () => { await api("POST", "calls", { kind, site_id: needs ? f.site_id.value : "", message: f.message.value, drill });
     f.message.value = ""; f.drill.checked = false; toast(drill ? "Drill started" : "Sent to everyone"); refresh(); });
 });
-async function checkIn(personUid, status, forOther = false) {
+// Checking someone else in: the same buttons they'd have, plus a note and a flight to follow for them.
+// What's typed lives in FOR_OTHER so the 30-second board refresh doesn't wipe it.
+let FOR_OTHER = {};
+function checkInForPanel(p, statuses) {
+  const note = h("input", { maxlength: 300, placeholder: `Where ${p.name} is, what they need`, value: FOR_OTHER.note || "",
+    "aria-label": `Note for ${p.name}`, oninput: (e) => { FOR_OTHER.note = e.target.value; } });
+  const flight = h("input", { maxlength: 12, placeholder: "Flying? Flight number, e.g. UA 1234", value: FOR_OTHER.flight || "",
+    "aria-label": `Flight number for ${p.name}`, autocapitalize: "characters", oninput: (e) => { FOR_OTHER.flight = e.target.value; } });
+  return h("div", { class: "checkin-for" },
+    h("p", { class: "muted" }, `Check ${p.name} in as:`),
+    h("div", { class: "checkin-btns" }, ...Object.entries(statuses).map(([k, v]) => h("button", { class: "st-" + k,
+      onclick: (e) => { e.target.disabled = true;
+        checkIn(p.uid, k, true, { note: FOR_OTHER.note, flight: FOR_OTHER.flight }).then((ok) => { if (ok) FOR_OTHER = {}; renderHome(); }); } },
+      { safe: "Safe", moving: "On the way", help: "Needs help" }[k] || v))),
+    note, flight);
+}
+async function checkIn(personUid, status, forOther = false, extra = {}) {
   const body = { person_uid: personUid, status };
-  if (!forOther) {
+  if (forOther) {
+    if ((extra.note || "").trim()) body.note = extra.note.trim();
+    if ((extra.flight || "").trim()) body.flight = extra.flight.trim();
+  } else {
     const batt = await batteryNow();
     if (batt) { body.battery = batt.level; }
     if ($("#checkin-lowbat").checked) body.battery_low = true;
@@ -543,13 +572,16 @@ async function checkIn(personUid, status, forOther = false) {
       if (pos) { body.lat = pos.coords.latitude; body.lon = pos.coords.longitude; } else toast("Couldn't get your location; sending without it", true);
     }
   }
+  let ok = false;
   await guarded(async () => {
     const r = await api("POST", "checkin", body);
+    ok = true;
     if (!forOther) { $("#checkin-note").value = ""; $("#checkin-flight").value = ""; $("#checkin-lowbat").checked = false; }
-    toast(r.flight ? "Checked in. Following your flight." : "Checked in");
+    toast(r.flight ? (forOther ? "Checked in. Following their flight." : "Checked in. Following your flight.") : "Checked in");
     await refresh();
     if (!forOther && r.airport) flightPrompt(r.airport);
   });
+  return ok;
 }
 // Android (Chrome) phones can say their battery level; iPhones can't, so they get a "My battery is low" box.
 async function batteryNow() {
@@ -667,7 +699,9 @@ async function loadAI() {
   if (f.contains(document.activeElement)) return;
   f.provider.replaceChildren(...Object.entries(r.providers).map(([v, t]) => h("option", { value: v }, t)));
   for (const k of ["summaries", "connector"]) f[k].checked = r[k];
-  for (const k of ["provider", "ollama_url", "model"]) f[k].value = r[k];
+  for (const k of ["provider", "ollama_url", "model", "command"]) f[k].value = r[k];
+  $("#ai-command-hint").textContent = `Set on the hub: ${r.command_hint}` + (r.command_source ? ` (now: ${r.command_source})` : "") + ".";
+  for (const k of ["redirects", "origins", "egress"]) f[k].value = (r.connector_apps[k] || []).join("\n");
   aiShow(r);
 }
 let aiLast = null;
@@ -676,18 +710,25 @@ function aiShow(r) {
   r = aiLast;
   const f = $("#ai-form"), ollama = f.provider.value === "ollama";
   $$(".ai-ollama", f).forEach((x) => { x.hidden = !ollama; });
-  const cli = !r ? "" : r.cli_found ? `The hub has the AI command (${r.cli})` + (r.cli_login ? " and a login file." : " but no login file (ai.env).")
-    : `The AI command (${r.cli}) isn't installed on the hub.`;
+  $$(".ai-cli", f).forEach((x) => { x.hidden = ollama; });
+  $$(".ai-conn", f).forEach((x) => { x.hidden = !f.connector.checked; });
+  const cli = !r ? "" : !r.cli ? "No AI command is set on the hub yet."
+    : (r.cli_found ? `The hub has the AI command (${r.cli})` + (r.cli_login ? " and a login file." : " but no login file (ai.env).")
+        : `The AI command (${r.cli}) isn't installed on the hub.`);
   const st = r && r.status && r.status.error ? ` Last try: ${r.status.error}` : "";
   $("#ai-note").textContent = (ollama ? "Ollama runs a free model on your own computer; nothing leaves your network." : cli) + st;
 }
 $("#ai-form").provider.addEventListener("change", () => aiShow(null));
+$("#ai-form").connector.addEventListener("change", () => aiShow(null));
 $("#ai-form").addEventListener("submit", (e) => {
   e.preventDefault();
   const f = e.target;
   guarded(async () => {
-    const r = await api("POST", "ai", { summaries: f.summaries.checked, connector: f.connector.checked, provider: f.provider.value,
-      ollama_url: f.ollama_url.value, model: f.model.value });
+    const lines = (t) => t.split(/\s+/).filter(Boolean);
+    const body = { summaries: f.summaries.checked, connector: f.connector.checked, provider: f.provider.value,
+      ollama_url: f.ollama_url.value, model: f.model.value,
+      connector_apps: { redirects: lines(f.redirects.value), origins: lines(f.origins.value), egress: lines(f.egress.value) } };
+    const r = await api("POST", "ai", body);
     aiShow(r); toast("Saved");
   });
 });
@@ -898,9 +939,10 @@ $("#lw-forget").addEventListener("click", () => confirm("Forget the Reddit secre
   guarded(async () => { await api("POST", "localwatch", { forget_secret: true }); loadLocalWatch(); }));
 
 /* ---------- BUNKR version: which one this is, and whether a newer one is out (admins choose when to upgrade) ---------- */
+let versionPoll = null;
 async function loadVersion() {
   const r = await api("GET", "version").catch(() => null);
-  if (!r) return;
+  if (!r) { if (versionPoll) versionPoll = setTimeout(loadVersion, 5000); return; }   // restarting mid-upgrade: keep asking
   $("#version-now").textContent = `This BUNKR is version ${r.current}.`;
   const admin = isAdmin() && r.latest !== undefined;
   $("#version-admin").hidden = !admin;
@@ -916,6 +958,7 @@ async function loadVersion() {
     $("#version-skip").textContent = r.skipped ? "Stop skipping it" : "Skip this version";
     $("#version-skip").onclick = () => guarded(async () => { await api("POST", "version/settings", { skip: r.skipped ? "" : L.version }); loadVersion(); });
   }
+  showUpgrade(r);
   $("#version-auto").checked = !!r.enabled;
   $("#version-auto").disabled = field || !r.repo;
   $("#version-check").hidden = field || !r.repo;
@@ -924,6 +967,30 @@ async function loadVersion() {
     : !r.enabled ? "Not checking for new versions."
     : r.error ? `Couldn't check: ${r.error}`
     : r.checked_at ? `Checked ${sinceIso(r.checked_at)}.${r.available ? "" : " You have the latest."}` : "Checks once a day.";
+}
+/* Upgrade now (.deb installs): BUNKR only leaves a request; a separate root service checks the signed release, backs up,
+   installs, restarts and goes back if BUNKR doesn't come up. The page polls while that happens (BUNKR restarts midway). */
+function showUpgrade(r) {
+  const U = r.upgrade || {}, st = U.status || {}, o = U.offer;
+  const recent = st.at && Date.now() - new Date(st.at) < 14 * 864e5;
+  const busy = !!U.pending || (st.state === "running" && Date.now() - new Date(st.at) < 36e5);
+  let line = "";
+  if (U.pending) line = U.pending_since > 120 ? `Upgrade to ${U.pending} asked for, but it hasn't started. Check bunkr-upgrade.path on this machine.`
+    : `Upgrade to ${U.pending} asked for. Starting…`;
+  else if (st.state === "running") line = `Upgrading to ${st.version}… BUNKR restarts on its own; this page catches up.`;
+  else if (st.state && recent && !(st.state === "done" && o)) line = st.message;
+  if (!line && !o && U.kind && U.kind !== "manual" && r.available) line = U.why;
+  $("#version-howto").hidden = U.kind === "deb" || U.kind === "git";
+  $("#version-upgrade").hidden = !line && !o;
+  $("#version-up-state").textContent = line || (o ? `Version ${o.version} is ready to install${o.source === "store" ? " from the store copy (no internet needed)" : ""}.` : "");
+  $("#version-up-row").hidden = !o || busy;
+  if (o) $("#version-up-btn").onclick = () => {
+    if (!confirm(`Upgrade BUNKR to ${o.version} now? It backs up the database, installs the new version and restarts, which takes a minute or two. If it doesn't come back up, it goes back to ${r.current}.`)) return;
+    if (o.major && !confirm(`${o.version} is a new major version. Read its notes first: some steps may be by hand. Upgrade anyway?`)) return;
+    guarded(async () => { await api("POST", "version/upgrade", { version: o.version, confirm_major: !!o.major }); loadVersion(); });
+  };
+  clearTimeout(versionPoll);
+  versionPoll = busy ? setTimeout(loadVersion, 5000) : null;
 }
 $("#version-check").addEventListener("click", () => guarded(async () => { await api("POST", "version/check"); loadVersion(); }));
 $("#version-auto").addEventListener("change", (e) => guarded(async () => { await api("POST", "version/settings", { enabled: e.target.checked }); loadVersion(); }));
@@ -2375,13 +2442,24 @@ function setProfileForm(prof) {
   const f = $("#node-form");
   for (const k of PROFILE_KEYS) f[k].checked = !!prof[k];
   for (const t of [1, 2, 3]) f["tier" + t].checked = (prof.tiers || []).includes(t);
+  const sel = prof.packs === undefined ? true : prof.packs;
+  f.packs.checked = sel !== false;
+  const packs = (N && N.packs) || [];
+  $("#node-packs").replaceChildren(...(packs.length > 1 ? [h("span", { class: "muted" }, "Which packs: "), ...packs.map((p) =>
+    h("label", { class: "check" }, h("input", { type: "checkbox", "data-pack": p.slug,
+      checked: sel === true || (Array.isArray(sel) && sel.includes(p.slug)) }), " " + p.name))] : []));
+  $("#node-packs").hidden = !f.packs.checked;
 }
 function profileFromForm() {
   const f = $("#node-form"), prof = {};
   for (const k of PROFILE_KEYS) prof[k] = f[k].checked;
   prof.tiers = [1, 2, 3].filter((t) => f["tier" + t].checked);
+  const boxes = $$("#node-packs input[data-pack]");
+  prof.packs = !f.packs.checked ? false
+    : boxes.every((b) => b.checked) ? true : boxes.filter((b) => b.checked).map((b) => b.dataset.pack);
   return prof;
 }
+$("#node-packs-all").addEventListener("change", (e) => { $("#node-packs").hidden = !e.target.checked; });
 $("#node-role").addEventListener("change", (e) => { if (!editingNode && N) setProfileForm(N.defaults[e.target.value]); });
 function ago(days) { return days === null || days === undefined ? "never" : days === 0 ? "today" : `${days} day${days === 1 ? "" : "s"} ago`; }
 function renderNodes() {
@@ -2465,6 +2543,7 @@ let D = null, depotTimer = null;
 async function loadDepot() {
   $("#depot-table tbody").replaceChildren(h("tr", {}, h("td", { colspan: 6, class: "muted" }, "Checking the Kiwix catalog…")));
   loadChirp();
+  loadPacks();
   const r = await guarded(() => api("GET", "depot"));
   if (!r) return;
   D = r;
@@ -2538,10 +2617,113 @@ $("#books-form").addEventListener("submit", (e) => {
   });
 });
 
+/* ---------- offline packs ---------- */
+let P = null;
+async function loadPacks() {
+  const r = await guarded(() => api("GET", "depot/packs"));
+  if (!r) return;
+  P = r;
+  renderPacks();
+}
+const packStatus = (st) => st.status === "ok" ? h("span", { class: "good" }, `ok${st.version ? " · " + st.version : ""}${st.size ? " · " + gb(st.size) : ""}`)
+  : st.status === "error" ? h("span", { class: "bad" }, "failed: " + st.error) : h("span", { class: "muted" }, "not fetched yet");
+function packItemLabel(i) {
+  if (i.type === "url") return i.label || i.file;
+  if (i.type === "zim") return i.label || `Kiwix book ${i.name}${i.flavour ? " (" + i.flavour + ")" : ""}`;
+  return i.label || `Linux package ${i.package}`;
+}
+function packItemForm(p) {
+  const f = h("form", { class: "row gap" });
+  const type = h("select", { name: "type", "aria-label": "What to add" },
+    h("option", { value: "url" }, "File from the web"), h("option", { value: "zim" }, "Kiwix book"), h("option", { value: "package" }, "Linux package"));
+  const url = h("input", { name: "url", type: "url", maxlength: 2000, placeholder: "https://…", "aria-label": "Web address" });
+  const sha = h("input", { name: "sha256", maxlength: 64, placeholder: "SHA-256 (optional)", "aria-label": "SHA-256 checksum, optional", spellcheck: "false" });
+  const book = h("select", { name: "book", "aria-label": "Book" }, ...(P.books || []).map((b, n) => h("option", { value: n }, b.label)));
+  const pkg = h("input", { name: "package", maxlength: 100, placeholder: "Package name", "aria-label": "Package name", autocapitalize: "off", spellcheck: "false" });
+  const label = h("input", { name: "label", maxlength: 120, placeholder: "What it is (optional)", "aria-label": "What it is, optional" });
+  const show = () => { url.hidden = sha.hidden = type.value !== "url"; book.hidden = type.value !== "zim"; pkg.hidden = type.value !== "package"; };
+  type.addEventListener("change", show); show();
+  f.append(type, url, sha, book, pkg, label, h("button", { type: "submit" }, "Add"));
+  f.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const item = { type: type.value, label: label.value.trim() };
+    if (type.value === "url") Object.assign(item, { url: url.value.trim(), sha256: sha.value.trim() });
+    else if (type.value === "zim") { const b = P.books[+book.value]; if (!b) return; Object.assign(item, { name: b.name, flavour: b.flavour }); }
+    else item.package = pkg.value.trim();
+    guarded(async () => { await api("POST", `depot/packs/${p.slug}/items`, item); toast("Added. Press Fetch to get it."); loadPacks(); });
+  });
+  return f;
+}
+function renderPacks() {
+  const last = P.last;
+  $("#packs-last").textContent = last ? `Last fetched ${when(last.at)}: ${last.ok} fine, ${last.changed} new, ${last.failed} failed.` : "Not fetched yet.";
+  $("#packs-list").replaceChildren(...P.packs.map((p) => h("div", { class: "card" },
+    h("div", { class: "row" }, h("h3", {}, p.name, " ", h("span", { class: "muted" }, p.bytes ? gb(p.bytes) : "")),
+      h("div", { class: "row-right" },
+        h("button", { class: "link", onclick: () => guarded(async () => { await api("POST", "depot/packs/fetch", { slug: p.slug }); pollDepot(); }) }, "Fetch"),
+        h("a", { class: "link", href: `/api/depot/packs/${p.slug}/export`, download: `bunkr-pack-${p.slug}.json` }, "Export"),
+        h("button", { class: "danger small", onclick: () => confirm(`Delete the pack "${p.name}" and its files from the store?`) &&
+          guarded(async () => { await api("DELETE", "depot/packs/" + p.slug); toast("Pack deleted"); loadPacks(); }) }, "Delete"))),
+    p.note ? h("p", { class: "muted" }, p.note) : null,
+    h("ul", { class: "plan-list" }, ...(p.items.length ? p.items.map((i) => h("li", {},
+      h("span", {}, packItemLabel(i), h("span", { class: "why" }, i.type === "url" ? " · " + i.url : ""), h("br"), packStatus(i.state)),
+      h("button", { class: "link", onclick: () => confirm(`Remove "${packItemLabel(i)}" from the pack? Its file is deleted from the store.`) &&
+        guarded(async () => { await api("DELETE", `depot/packs/${p.slug}/items/${i.id}`); loadPacks(); }) }, "Remove")))
+      : [h("li", { class: "muted" }, "Empty. Add something below.")])),
+    packItemForm(p))));
+  $("#os-builtin").textContent = P.os.builtin.join(", ");
+  $("#os-extra").replaceChildren(...P.os.extra.map((n) => h("li", {}, n, " ",
+    h("button", { class: "link", onclick: () => guarded(async () => { await api("DELETE", "depot/packs/os/" + encodeURIComponent(n)); toast("Removed. Its files go at the next fetch."); loadPacks(); }) }, "Remove"))));
+  const st = P.os.status;
+  $("#os-status").textContent = !st ? "Not fetched yet." : st.ok
+    ? `Last fetched ${when(st.at)} for ${st.system}: ${st.files} packages.` + (st.missing && st.missing.length ? ` Not found: ${st.missing.join(", ")}.` : "")
+    : `Last fetch failed ${when(st.at)}: ${st.error}`;
+  const sf = $("#packs-settings-form");
+  sf.max_item_gb.value = P.settings.max_item_gb; sf.allow_lan.checked = P.settings.allow_lan;
+}
+$("#packs-fetch").addEventListener("click", () => guarded(async () => { await api("POST", "depot/packs/fetch", {}); pollDepot(); }));
+$("#pack-new-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const f = e.target;
+  guarded(async () => { await api("POST", "depot/packs", { name: f.name.value }); f.reset(); toast("Pack added"); loadPacks(); });
+});
+$("#pack-import").addEventListener("change", (e) => {
+  const file = e.target.files[0];
+  e.target.value = "";
+  if (!file) return;
+  if (file.size > 256 * 1024) return toast("That file is too big to be a pack", true);
+  guarded(async () => {
+    let pack;
+    try { pack = JSON.parse(await file.text()); } catch { throw new Error("That file isn't a BUNKR pack"); }
+    const r = await api("POST", "depot/packs/import", { pack });
+    toast(`Imported "${r.name}" (${r.items.length} items). Press Fetch to get them.`); loadPacks();
+  });
+});
+$("#os-add-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const f = e.target, name = f.name.value.trim();
+  guarded(async () => {
+    toast("Asking apt…");
+    const c = await api("POST", "depot/packs/os/check", { name });
+    const extra = c.new.length > 1 ? ` It brings ${c.new.length - 1} more it needs.` : "";
+    if (!confirm(`Add ${c.name}? Linux packages go from ${gb(c.before)} to ${gb(c.after)}.${extra}`)) return;
+    await api("POST", "depot/packs/os", { name }); f.reset(); toast("Added. It's fetched at the next fetch."); loadPacks();
+  });
+});
+$("#packs-settings-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const f = e.target;
+  if (f.allow_lan.checked && !P.settings.allow_lan &&
+      !confirm("Allow addresses on the home network? Only do this for a file server you run yourself.")) return;
+  guarded(async () => { await api("POST", "depot/packs/settings", { max_item_gb: +f.max_item_gb.value, allow_lan: f.allow_lan.checked }); toast("Saved"); loadPacks(); });
+});
+
 function renderDepot() {
   renderReader();
   const u = D.usage;
   $("#depot-usage").textContent = `${gb(u.held_bytes)} stored · ${gb(u.free)} free on the disk`;
+  renderMeshKit();
+  const pinned = new Set(D.pinned || []);
   $("#auto-update").checked = D.auto_update;
   const tierName = { 0: "Readers", 1: "Tier 1", 2: "Tier 2", 3: "Tier 3" };
   $("#depot-table tbody").replaceChildren(...D.catalog.map((c) => h("tr", {},
@@ -2552,6 +2734,12 @@ function renderDepot() {
     h("td", {}, c.online ? (c.latest || "current") : h("span", { class: "muted" }, "offline")),
     h("td", { class: "num" }, gb(c.held ? c.held.size : c.latest_size)),
     h("td", {}, c.update ? h("span", { class: "warn" }, "update") : "",
+      c.held && c.kind !== "tool" && c.id !== "mesh-offline" ? (() => {
+        const kept = pinned.has(`${c.kind}/${c.id}/${c.held.version}`);
+        return h("button", { class: "link", title: "Keep this version when a newer one arrives", onclick: () => guarded(async () => {
+          await api("POST", "depot/pin", { id: c.held.id, keep: !kept }); toast(kept ? "Old versions of it will be cleaned up" : "This version will be kept"); loadDepot(); }) },
+          kept ? "Kept" : "Keep");
+      })() : null,
       c.held ? h("button", { class: "danger small", onclick: () => confirm(`Delete ${c.held.path} from the store?`) &&
         guarded(async () => { await api("DELETE", "depot/files/" + c.held.id); loadDepot(); }) }, "Delete") : null))));
   const ups = D.updates;
@@ -2566,6 +2754,48 @@ function renderDepot() {
     ? `Current archive: ${newest}.` + (D.documents_changed_at > (docs.find((f) => f.version === newest)?.fetched_at || "") ? " Documents changed since; rebuild it." : "")
     : "No archive in the store yet.";
 }
+function renderMeshKit() {
+  const m = D.mesh_offline;
+  if (!m) return;
+  const st = m.status || {};
+  $("#meshkit-status").replaceChildren(!st.checked_at ? h("span", { class: "muted" }, "Not fetched yet: it runs at 4 a.m., or tick it in the Catalog and fetch.")
+    : st.ok ? h("span", {}, `Version ${st.version}: ${st.firmware_files} firmware files (${(st.releases || []).join(", ")}), ${st.wheels} Python packages · ${sinceIso(st.checked_at)}`,
+        st.wheels_note ? h("span", { class: "warn" }, " " + st.wheels_note) : "")
+    : h("span", { class: "bad" }, `Last refresh failed ${sinceIso(st.checked_at)}: ${st.error}.` + (st.last_good ? ` The copy from ${sinceIso(st.last_good)} is still there.` : "")));
+  $("#meshkit-boards").replaceChildren(...Object.entries(m.boards_all).map(([id, label]) =>
+    h("label", { class: "check" }, h("input", { type: "checkbox", name: "board", value: id, checked: m.boards.includes(id) }), " " + label)));
+}
+$("#meshkit-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const boards = $$("#meshkit-boards input:checked").map((i) => i.value);
+  guarded(async () => { await api("POST", "depot/mesh-offline", { boards }); toast("Saved: the next refresh keeps these boards"); });
+});
+function renderSpace(r) {
+  const s = r.space, b = s.backups, names = { nightly: "nightly", deploy: "before a deploy", other: "made by hand or older", partial: "unfinished" };
+  $("#space-body").hidden = false;
+  $("#space-table tbody").replaceChildren(
+    h("tr", {}, h("td", {}, "Database"), h("td", { class: "num" }, gb(s.database))),
+    ...Object.entries(b).map(([k, v]) => h("tr", {}, h("td", {}, `Database copies, ${names[k] || k} (${v.files})`), h("td", { class: "num" }, gb(v.bytes)))),
+    ...Object.entries(s.store).filter(([, n]) => n).map(([k, n]) => h("tr", {}, h("td", {}, `Store: ${k}`), h("td", { class: "num" }, gb(n)))),
+    h("tr", {}, h("td", {}, h("strong", {}, "Free on the disk")), h("td", { class: "num" }, gb(s.free))));
+  const f = $("#retention-form");
+  for (const k of ["deploy_keep", "nightly_keep", "monthly_keep"]) f[k].value = r.settings[k];
+  f.clean_store.checked = r.settings.clean_store;
+  const gone = [...r.backups.filter((x) => x.action === "delete").map((x) => ({ path: "db-backups/" + x.name, bytes: x.bytes, why: x.why })), ...r.store.delete];
+  $("#space-plan").replaceChildren(...(gone.length ? gone.map((x) => h("li", {}, `${x.path} · ${gb(x.bytes)} · ${x.why}`)) : [h("li", { class: "muted" }, "Nothing.")]));
+  $("#space-unknown").replaceChildren(...(r.store.unknown.length ? r.store.unknown.map((x) => h("li", {}, `${x.path} · ${gb(x.bytes)}`)) : [h("li", { class: "muted" }, "None.")]));
+  $("#space-clean").disabled = !gone.length;
+}
+$("#space-load").addEventListener("click", () => guarded(async () => renderSpace(await api("GET", "depot/space"))));
+$("#retention-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const f = e.target;
+  guarded(async () => { renderSpace(await api("POST", "depot/retention", { deploy_keep: +f.deploy_keep.value, nightly_keep: +f.nightly_keep.value,
+    monthly_keep: +f.monthly_keep.value, clean_store: f.clean_store.checked })); toast("Saved"); });
+});
+$("#space-clean").addEventListener("click", () => confirm("Clear out the files listed?") && guarded(async () => {
+  const r = await api("POST", "depot/clean"); toast(`Cleared ${r.removed} file${r.removed === 1 ? "" : "s"}`); renderSpace(r);
+}));
 $("#auto-update").addEventListener("change", (e) => guarded(async () => {
   await api("POST", "depot/settings", { auto_update: e.target.checked }); toast("Saved");
 }));
@@ -2596,7 +2826,7 @@ async function pollDepot() {
     : { done: "Finished.", failed: "Failed, see log.", cancelled: "Cancelled." }[j.state];
   $("#depot-log").textContent = j.log.join("\n");
   if (running) depotTimer = setTimeout(pollDepot, 1000);
-  else if ($("#tab-downloads").hidden === false) { const r = await api("GET", "depot").catch(() => null); if (r) { D = r; renderDepot(); } }
+  else if ($("#tab-downloads").hidden === false) { const r = await api("GET", "depot").catch(() => null); if (r) { D = r; renderDepot(); } loadPacks(); }
 }
 
 /* ---------- session, logins, field node ---------- */
@@ -3523,10 +3753,8 @@ async function loadMesh() {
       + (st.radio.freq_mhz ? ` · ${st.radio.freq_mhz} MHz SF${st.radio.sf}` : "")) : null,
     st.error ? h("div", { class: "bad" }, st.error) : null);
   const chans = r.channels || [];
-  const cmds = [["?", "the list of commands"], ["WHO", "everyone's last check-in"], ["READY", "days of water and food", 1],
-    ["ALERTS", "what's happening near our places"], ["FLIGHT", "flights we're following"], ["NEWS", "the morning brief in a line"],
-    ["PING", "is BUNKR listening"], ["!have water", "what we have and where", 1], ["!add 2 cases water @ garage", "add to the inventory (adults)", 1],
-    ["!used 1 water", "take some away (adults)", 1], ["!home", "Home Assistant: what you can run; !home lights, !home status", 1]];
+  const off = new Set(r.bot_off || (r.settings || {}).bot_off || []);
+  const cmds = MESH_CMDS.filter(([, , , key]) => !key || !off.has(key));
   $("#mesh-join").replaceChildren(chans.length
     ? [h("p", {}, "On your phone, install the MeshCore app and pair your radio, then add ", chans.length > 1 ? "these channels:" : "the channel:"),
       h("ul", { class: "plain mesh-chans" }, ...chans.map((c) => h("li", {}, h("a", { href: c.link }, `Add "${c.name}" to MeshCore`),
@@ -3548,8 +3776,11 @@ async function loadMesh() {
   MESH_ADMIN = r;
   const f = $("#mesh-form");
   if (!f.contains(document.activeElement)) {
-    f.enabled.checked = !!s.enabled; f.connect.value = s.connect || "";
+    f.enabled.checked = !!s.enabled; f.connect.value = s.connect || ""; f.brief_at.value = s.brief_at || "";
     $("#mesh-channels").replaceChildren(...chans.map(meshChannelRow));
+    const offNow = new Set(r.bot_off || []);
+    $("#mesh-bot-cmds").replaceChildren(...MESH_CMDS.filter((c) => c[3]).map(([label, , , key]) =>
+      h("label", { class: "check" }, h("input", { type: "checkbox", name: "bot_cmd", value: key, checked: !offNow.has(key) }), label.replace(/^!/, ""))));
   }
   renderMeshNodes(r.nodes || []);
   $("#mesh-log").replaceChildren(...(r.log.length ? r.log.map((x) => h("li", {},
@@ -3558,6 +3789,20 @@ async function loadMesh() {
     : [h("li", { class: "muted" }, "Nothing yet.")]));
 }
 let MESH_ADMIN = null;
+// [what to type, what it does, family channel only, the command an admin can switch off]
+const MESH_CMDS = [["?", "every command, a page at a time (? 2 for the next)"], ["WHO", "everyone's last check-in"],
+  ["!where", "where everyone last checked in from", 1, "where"], ["READY", "days of water and food", 1, "ready"],
+  ["ALERTS", "what's happening near our places; !alerts 80202 for weather alerts, fires and quakes near a place", 0, "alerts"],
+  ["WX", "weather now, today and tonight; !wx 80202, !wx Denver CO 5 for 3, 5 or 7 days", 0, "wx"],
+  ["SUN", "sunrise, sunset, daylight and the moon; !sun 80202", 0, "sun"], ["QUAKE", "earthquakes nearby today; !quake 80202", 0, "quake"],
+  ["SPACE", "space weather: radio blackouts, storms, Kp", 0, "space"],
+  ["FLIGHT", "flights we're following; !flight UA123 for any flight", 0, "flight"],
+  ["OVERHEAD", "aircraft near your radio (if it shares its position) or !overhead 80202", 0, "overhead"],
+  ["NEWS", "numbered headlines; send a number for that story, MORE for the next ones", 0, "news"],
+  ["!ask question", "a very short answer from the AI, marked AI (when AI is on)", 1, "ask"],
+  ["!have water", "what we have and where", 1, "have"], ["!add 2 cases water @ garage", "add to the inventory (adults)", 1, "add"],
+  ["!used 1 water", "take some away (adults)", 1, "used"], ["!home", "Home Assistant: what you can run; !home lights, !home status", 1, "home"],
+  ["PING", "is BUNKR listening"], ["TRACE", "the route your message took, by repeater name", 0, "trace"]];
 const personOptions = (sel) => [h("option", { value: "" }, "— nobody yet —"),
   ...((S && S.board && S.board.people) || []).map((p) => h("option", { value: p.uid, selected: p.uid === sel }, p.name))];
 function renderMeshNodes(list) {
@@ -3610,6 +3855,7 @@ function meshChannelRow(c) {
         h("button", { type: "button", class: "small", onclick: (e) => { const i = e.target.closest(".mesh-chan").querySelector("[name=secret]");
           if (!i.value || confirm("Make a new key? Everyone on this channel has to add it again.")) { i.value = ""; toast("Save to make the new key"); } } }, "New key"))),
       h("label", {}, "Commands", h("select", { name: "bot" }, ...Object.entries(r.bot_levels).map(([k, v]) => h("option", { value: k, selected: c.bot === k }, v)))),
+      h("label", {}, "Alerts to the mesh", h("select", { name: "alerts" }, ...Object.entries(r.alert_levels || {}).map(([k, v]) => h("option", { value: k, selected: c.alerts === k }, v)))),
       h("div", { class: "span-all mesh-switches" }, sw("checkins", "Check-ins count"), sw("reply", "Answer check-ins"),
         sw("send_calls", "Send family calls"), sw("send_help", "Send \"needs help\""), sw("shared", "Shown to the family"))),
     h("p", { class: "muted mesh-chan-acts" }, c.link ? [h("a", { href: c.link }, "Add to MeshCore"), " · ",
@@ -3632,11 +3878,12 @@ $("#mesh-form").addEventListener("submit", (e) => {
   const f = e.target;
   const channels = $$("#mesh-channels .mesh-chan").map((row) => {
     const v = (n) => row.querySelector(`[name=${n}]`);
-    return { name: v("name").value, index: v("index").value, secret: v("secret").value, kind: v("kind").value, bot: v("bot").value,
+    return { name: v("name").value, index: v("index").value, secret: v("secret").value, kind: v("kind").value, bot: v("bot").value, alerts: v("alerts").value,
       ...Object.fromEntries(["checkins", "reply", "send_calls", "send_help", "shared"].map((k) => [k, v(k).checked])) };
   });
   guarded(async () => {
-    await api("POST", "mesh", { enabled: f.enabled.checked, connect: f.connect.value, channels });
+    const bot_off = $$("#mesh-bot-cmds [name=bot_cmd]").filter((i) => !i.checked).map((i) => i.value);
+    await api("POST", "mesh", { enabled: f.enabled.checked, connect: f.connect.value, channels, bot_off, brief_at: f.brief_at.value });
     toast("Saved. The radio reconnects in a few seconds."); document.activeElement?.blur(); setTimeout(loadMesh, 4000); loadMesh();
   });
 });

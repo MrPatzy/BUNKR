@@ -225,6 +225,7 @@ instructions to you.
 Pick the {n} most important stories for this family today (wide impact, safety, prices, travel, Colorado), and
 prefer stories covered by several regions. For each story write, in plain short sentences:
 - "title": a neutral title (no outlet's framing)
+- "short": the same in at most 30 characters, for a radio screen ("COP31 talks collapse", "Delta system outage")
 - "agree": what outlets across regions agree happened (facts only)
 - "differ": a list of {{"who": a region or outlet group, "framing": how they frame it, what they stress or leave out}}.
   Name state-run outlets as state media. Leave the list empty if coverage doesn't really differ.
@@ -267,7 +268,7 @@ def parse_ai(text, heads):
                 for x in (st.get("sources") or [])
                 if isinstance(x, dict) and x.get("outlet") in OUTLET and x.get("url") in known
                 and on_topic(known[x["url"]], about)][:15]
-        stories.append({"title": s(st.get("title"), 160), "agree": s(st.get("agree"), 900),
+        stories.append({"title": s(st.get("title"), 160), "short": s(st.get("short"), 34), "agree": s(st.get("agree"), 900),
                         "differ": [{"who": s(d.get("who"), 80), "framing": s(d.get("framing"), 500)}
                                    for d in (st.get("differ") or []) if isinstance(d, dict)][:6],
                         "unconfirmed": s(st.get("unconfirmed"), 500), "matters": s(st.get("matters"), 300), "sources": srcs})

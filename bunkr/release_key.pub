@@ -1,0 +1,2 @@
+# BUNKR release signing key (Ed25519, base64). Upgrades are only installed if SHA256SUMS is signed by it.
+aHSaMTiw0DSsAiEnvSKZFk2lPor4+hkZ7tI3Dr1zBNk=

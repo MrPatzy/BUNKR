@@ -79,8 +79,9 @@ want it, one card on the Household tab ("AI (optional)") turns on:
 - **AI summaries:** the morning brief says where outlets agree and differ, and news stories get sorted by place and topic.
 - **AI connector (MCP):** an AI assistant can read your inventory and add or move items, after you sign in. Never firearms.
 
-It can run on a free local model (Ollama, on your own computer) or a command-line AI tool on the hub. Nothing else
-in BUNKR uses AI.
+It can run on a free local model (Ollama, on your own computer) or any command-line AI tool on the hub that reads a
+prompt and prints a reply (you set its command on the hub, see deploy/INSTALL.md). The connector works with any AI app that supports
+MCP connectors: list its sign-in callback address on the card. Nothing else in BUNKR uses AI.
 
 ## Versions and upgrades
 

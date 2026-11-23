@@ -1,0 +1,22 @@
+# BUNKR from the .deb. Options (address, port, role, host names) are in /etc/default/bunkr.
+[Unit]
+Description=BUNKR preparedness hub
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+User=bunkr
+Group=bunkr
+WorkingDirectory=/usr/lib/bunkr
+Environment=HOME=/var/lib/bunkr
+Environment="BUNKR_ARGS=--require-login"
+EnvironmentFile=-/etc/default/bunkr
+ExecStart=/usr/bin/python3 -m bunkr --db /var/lib/bunkr/bunkr.db --no-browser $BUNKR_ARGS
+Restart=on-failure
+NoNewPrivileges=yes
+ProtectSystem=full
+PrivateTmp=yes
+ReadWritePaths=/var/lib/bunkr
+
+[Install]
+WantedBy=multi-user.target

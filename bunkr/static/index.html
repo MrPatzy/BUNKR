@@ -174,6 +174,10 @@
       <h2 class="tile-head"><button type="button" class="tile-toggle" aria-expanded="true">Backups</button></h2>
       <div class="tile-body"><div id="backup-card"></div></div>
     </div>
+    <div class="card tile-card" data-tile="hub">
+      <h2 class="tile-head"><button type="button" class="tile-toggle" aria-expanded="true">Hub computer</button></h2>
+      <div class="tile-body"><div id="hub-card"></div></div>
+    </div>
     </div>
     <p class="home-foot"><button type="button" id="home-arrange">Arrange Home</button></p>
     <dialog id="arrange-dialog">
@@ -596,6 +600,14 @@
           <div id="mesh-channels"></div>
           <p><button type="button" class="small" data-add-kind="family">Add a family channel</button>
             <button type="button" class="small" data-add-kind="group">Add a trusted-group channel</button></p>
+          <h3>The bot</h3>
+          <p class="muted">Commands anyone on a channel can use (WHO, PING and ? always answer). Alerts to the mesh are set per
+            channel above: flash alerts go out at any hour, the rest wait out 22:00-06:30, at most 6 an hour; reminders never go.</p>
+          <div id="mesh-bot-cmds" class="mesh-switches"></div>
+          <div class="form-grid">
+            <label>Daily mesh brief at<input type="time" name="brief_at"><span class="muted">Weather at home, alerts and three
+              headlines on the family channels. Empty: none.</span></label>
+          </div>
           <div class="actions"><button type="submit" class="primary">Save</button></div>
         </form>
         <p class="muted">With radios on the hub and the Pi, let only one of them send calls and "needs help", or the family hears them twice.</p>
@@ -1064,6 +1076,8 @@
           <label class="check"><input type="checkbox" name="radio"> Radio files</label>
           <label class="check"><input type="checkbox" name="firmware"> Mesh firmware</label>
           <label class="check"><input type="checkbox" name="apps"> Apps</label>
+          <label class="check"><input type="checkbox" name="packs" id="node-packs-all"> Offline packs</label>
+          <div class="span-all" id="node-packs"></div>
         </fieldset>
         <label class="span2">Notes<input name="notes"></label>
         <div class="actions span-all"><button type="submit" class="primary">Save node</button>
@@ -1140,6 +1154,34 @@
         <button id="chirp-fetch">Check GitHub now</button>
       </div>
     </div>
+    <div class="card" id="meshkit-card">
+      <h2>Offline mesh kit</h2>
+      <p class="muted">MeshCore firmware for your boards (the newest release and the one before, checked against
+        GitHub's checksums), plus meshcore-cli and esptool to install with no internet. Refreshed every morning at 4;
+        a new major version waits for you under Updates. It syncs to nodes with firmware; README.txt inside says how
+        to flash a board.</p>
+      <p id="meshkit-status"></p>
+      <form id="meshkit-form" class="row gap"><span id="meshkit-boards" class="row gap"></span>
+        <button type="submit">Save boards</button></form>
+    </div>
+    <div class="card" id="space-card">
+      <div class="row"><h2>Space used</h2><button id="space-load" class="link">Show</button></div>
+      <div id="space-body" hidden>
+        <div class="table-wrap"><table id="space-table"><tbody></tbody></table></div>
+        <form id="retention-form" class="form-grid">
+          <label>Deploy copies to keep<input type="number" name="deploy_keep" min="1" max="200"></label>
+          <label>Nightly copies to keep<input type="number" name="nightly_keep" min="1" max="365"></label>
+          <label>Months of monthly copies<input type="number" name="monthly_keep" min="0" max="120"></label>
+          <label class="check"><input type="checkbox" name="clean_store"> Remove old library and firmware versions once a new one checks out</label>
+          <div class="actions"><button type="submit">Save</button></div>
+        </form>
+        <p class="muted">The newest copy and the one the restore test uses are always kept, and so is anything BUNKR
+          didn't make itself (copies made by hand). Clean-up runs each night; this is what it would remove now:</p>
+        <ul class="plain" id="space-plan"></ul>
+        <details><summary class="link">Files the store has no record of (never removed)</summary><ul class="plain" id="space-unknown"></ul></details>
+        <button id="space-clean" class="danger">Clean up now</button>
+      </div>
+    </div>
     <div class="card" id="updates-card" hidden>
       <h2>Updates</h2>
       <div class="table-wrap"><table id="updates-table">
@@ -1156,6 +1198,35 @@
         <div class="actions"><button type="submit" class="primary">Build archive into the store</button></div>
       </form>
       <p class="muted" id="archive-status"></p>
+    </div>
+    <div class="card" id="packs-card">
+      <div class="row"><h2>Offline packs</h2>
+        <div class="row-right"><button id="packs-fetch" class="primary">Fetch now</button></div></div>
+      <p class="muted">Your own lists of things to keep with no internet: files from the web, Kiwix books, Linux packages.
+        BUNKR fetches them every week (or now), checks them, and copies them to the nodes. The old copy stays until a new one checks out.</p>
+      <p class="muted" id="packs-last"></p>
+      <div id="packs-list"></div>
+      <form id="pack-new-form" class="row gap">
+        <input name="name" maxlength="60" required placeholder="New pack, like Car manuals" aria-label="New pack name">
+        <button type="submit">Add pack</button>
+        <label class="btn">Import a pack…<input type="file" id="pack-import" hidden accept=".json,application/json"></label>
+      </form>
+      <h3>Linux packages</h3>
+      <p class="muted">Kept so a node or a rebuilt machine can install them with no internet. Always kept: <span id="os-builtin"></span>.</p>
+      <ul class="plain" id="os-extra"></ul>
+      <form id="os-add-form" class="row gap">
+        <input name="name" maxlength="100" required placeholder="Package name, like gpsd" aria-label="Package name"
+          autocapitalize="off" autocorrect="off" spellcheck="false">
+        <button type="submit">Add</button>
+      </form>
+      <p class="muted" id="os-status"></p>
+      <details><summary>Limits</summary>
+        <form id="packs-settings-form" class="row gap">
+          <label>Biggest file (GB)<input name="max_item_gb" type="number" min="0.01" max="500" step="0.01"></label>
+          <label class="check"><input type="checkbox" name="allow_lan"> Allow home-network addresses (192.168…, 10…)</label>
+          <button type="submit">Save</button>
+        </form>
+      </details>
     </div>
     <div class="card">
       <div class="row"><h2>Catalog</h2>
@@ -1249,6 +1320,16 @@
         <label class="span2">Where the AI runs<select name="provider"></select></label>
         <label class="ai-ollama">Ollama address<input name="ollama_url" autocomplete="off" spellcheck="false" placeholder="http://127.0.0.1:11434"></label>
         <label class="ai-ollama">Model<input name="model" autocomplete="off" spellcheck="false" placeholder="llama3.1:8b"></label>
+        <label class="ai-cli span2">AI command<input name="command" readonly autocomplete="off" spellcheck="false">
+          <span class="muted" id="ai-command-hint"></span></label>
+        <label class="ai-conn span-all">Connector: sign-in callback addresses<textarea name="redirects" rows="2" autocomplete="off" spellcheck="false"
+          placeholder="https://app.example/oauth/callback"></textarea>
+          <span class="muted">(one per line, exactly as the AI app's help page gives them)</span></label>
+        <label class="ai-conn span-all">Connector: app web addresses<textarea name="origins" rows="2" autocomplete="off" spellcheck="false"
+          placeholder="https://app.example"></textarea></label>
+        <label class="ai-conn span-all">Connector: app server networks<textarea name="egress" rows="2" autocomplete="off" spellcheck="false"
+          placeholder="203.0.113.0/24"></textarea>
+          <span class="muted">(optional; when listed, connections through Cloudflare must come from these)</span></label>
         <p class="muted span-all" id="ai-note"></p>
         <div class="actions span-all"><button type="submit" class="primary">Save</button> <button type="button" id="ai-test">Test the AI</button></div>
       </form>
@@ -1311,7 +1392,7 @@
         <div id="version-new" hidden>
           <p class="version-avail" id="version-avail"></p>
           <details><summary>What's new</summary><div class="version-notes" id="version-notes"></div></details>
-          <details><summary>How to upgrade</summary>
+          <details id="version-howto"><summary>How to upgrade</summary>
             <ol class="version-steps">
               <li>Back up first (a snapshot of the machine or container, or at least <code>/var/lib/bunkr</code>).</li>
               <li>Update the BUNKR folder you installed from: <code>git pull</code> in it, or copy in the new release's files.</li>
@@ -1322,6 +1403,10 @@
             </ol>
             <p class="muted">Nothing changes until you do this. You can stay on this version as long as you like.</p></details>
           <div class="row gap"><button type="button" id="version-skip">Skip this version</button></div>
+        </div>
+        <div id="version-upgrade" hidden>
+          <p id="version-up-state"></p>
+          <div class="row gap" id="version-up-row" hidden><button type="button" class="primary" id="version-up-btn">Upgrade now</button></div>
         </div>
         <p class="muted" id="version-state"></p>
         <div class="row gap"><button type="button" id="version-check">Check now</button>

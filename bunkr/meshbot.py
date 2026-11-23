@@ -4,26 +4,45 @@ Ideas from meshcore-bot (github.com/agessaman/meshcore-bot, MIT): keyword comman
 overall rate limits so a bot doesn't eat the channel's airtime, and a short command list on request. The code here is
 BUNKR's own and runs inside BUNKR's radio link (bunkr/mesh.py): one companion radio can only be driven by one program.
 
-Commands, any case. A single word on its own works as is (WHO, READY, ALERTS, FLIGHT, NEWS, PING, ?); anything with
-more to it starts with "!" (or "/"), so ordinary chat ("got it", "home in 10", "have you eaten?") never sets the bot off.
-HELP is never a command: it always means "I need help".
-  ?  / !commands                what the bot understands
+Commands, any case. A single word on its own works as is (WHO, READY, ALERTS, WX, SUN, NEWS, PING, TRACE, ?);
+anything with more to it starts with "!" (or "/"), so ordinary chat ("got it", "home in 10", "have you eaten?") never
+sets the bot off. HELP is never a command: it always means "I need help". Admins can switch any command off.
+  ?  / ? 2 / !commands          every command, a page at a time
   WHO  / !status                everyone's last check-in
+  !where                        where everyone last checked in from
   !have water                   what we have and where (firearms never)
   !add 2 cases water @ garage   add to the inventory (adults)
   !used 1 water                 take some away (adults)
   READY                         how ready we are: days of water and food, the biggest gap
-  ALERTS                        what's happening near our places
-  FLIGHT                        flights the family is following
-  NEWS                          the morning brief in a line
+  ALERTS / !alerts 80202        what's happening near our places / weather alerts, fires and quakes near a place
+  WX / !wx 80202 / !wx Denver CO 5   weather now, today and tonight; or 3, 5, 7 (or 10: NWS gives 7) days
+  SUN / !sun 80202              sunrise, sunset, daylight and the moon (worked out offline)
+  QUAKE / !quake 80202          earthquakes nearby in the last day
+  SPACE                         space weather: radio blackouts, geomagnetic storms, Kp
+  FLIGHT / !flight UA123        flights the family is following / any flight now
+  OVERHEAD / !overhead 80202    aircraft near you (your node's shared position) or a place
+  NEWS / !news 2 / !news more   numbered headlines / one story in 2-3 messages (or just "2" right after)
+  !ask how long to boil water   a very short answer from the local AI, marked AI (only when AI is on)
   !home / !home lights / !home status   Home Assistant (bunkr/homeassistant.py), only what an admin allowed
-  PING                          is the bot there (and how well it hears you)
+  PING / TRACE                  is the bot there / the route your message took, by repeater name
 """
 
 import re
+import threading
 import time
 
 from . import audit, checkins, gaps, quickadd
+
+
+class Later:
+    """An answer that needs the internet or the AI: bunkr/mesh.py runs fn() off the radio's thread and sends what it
+    returns (a line or a list of lines)."""
+
+    def __init__(self, fn, label=""):
+        self.fn, self.label = fn, label
+
+    def run(self):
+        return self.fn()
 
 PER_PERSON = (8, 60)       # at most 8 answers a minute to one person
 OVERALL = (20, 300)        # and 20 every five minutes in all
@@ -44,20 +63,54 @@ def allowed(key, limit, now=None):
 COMMANDS = {  # word -> command; aliases included
     "?": "menu", "commands": "menu", "menu": "menu", "cmds": "menu",
     "who": "who", "status": "who", "board": "who",
-    "have": "have", "inv": "have", "inventory": "have", "find": "have", "where": "have",
+    "where": "where", "whereis": "where",
+    "have": "have", "inv": "have", "inventory": "have", "find": "have",
     "add": "add", "got": "add", "bought": "add",
     "used": "used", "use": "used", "took": "used",
     "ready": "ready", "readiness": "ready",
     "alerts": "alerts", "alert": "alerts", "situation": "alerts",
+    "wx": "wx", "weather": "wx", "forecast": "wx",
+    "sun": "sun", "sunrise": "sun", "sunset": "sun", "moon": "sun",
+    "quake": "quake", "quakes": "quake", "earthquake": "quake", "eq": "quake",
+    "space": "space", "spacewx": "space", "solar": "space",
     "flight": "flight", "flights": "flight",
-    "news": "news", "brief": "news",
+    "overhead": "overhead", "planes": "overhead", "aircraft": "overhead",
+    "news": "news", "brief": "news", "more": "more",
+    "ask": "ask", "ai": "ask",
     "home": "home", "ha": "home",
     "ping": "ping", "test": "ping",
+    "trace": "trace", "path": "trace", "route": "trace",
 }
-MENU = "BUNKR: SAFE/OMW/HELP check in. WHO READY ALERTS FLIGHT NEWS PING, !have water, !add 2 cases water, !used 1 water, !home"
-MENU_BASIC = "BUNKR: SAFE/OMW/HELP check in. WHO ALERTS FLIGHT NEWS PING"
-BASIC = {"menu", "ping", "who", "alerts", "flight", "news"}  # what a trusted-group channel may ask
-BARE = {"menu", "who", "ready", "alerts", "flight", "news", "ping"}  # may be sent as one word with no "!"
+# the full list for "?", in pages; (command, what to show)
+HELP_LINES = [("who", "WHO"), ("where", "!where"), ("ready", "READY"), ("alerts", "ALERTS [zip]"), ("wx", "WX [zip] [3/5/7]"),
+              ("sun", "SUN [zip]"), ("quake", "QUAKE [zip]"), ("space", "SPACE"), ("flight", "FLIGHT [UA123]"),
+              ("overhead", "OVERHEAD [zip]"), ("news", "NEWS, !news 2, MORE"), ("ask", "!ask question (AI)"),
+              ("have", "!have water"), ("add", "!add 2 cases water @garage"), ("used", "!used 1 water"), ("home", "!home"),
+              ("ping", "PING"), ("trace", "TRACE")]
+BASIC = {"menu", "ping", "trace", "who", "alerts", "wx", "sun", "quake", "space", "flight", "overhead", "news", "more"}  # a trusted group
+BARE = {"menu", "who", "where", "ready", "alerts", "wx", "sun", "quake", "space", "flight", "overhead", "news", "more", "ping", "trace"}
+SWITCHABLE = ["where", "ready", "alerts", "wx", "sun", "quake", "space", "flight", "overhead", "news", "ask", "have", "add", "used",
+              "home", "trace"]   # admins can turn these off (WHO, PING and the menu always answer)
+NET = {"wx", "quake", "space", "overhead", "ask"}   # always need the internet (or the AI)
+
+
+def menu(page, allowed_cmds, basic):
+    """'BUNKR 1/2: SAFE/OMW/HELP check in. WHO, !where, ...'"""
+    lines = [label for cmd, label in HELP_LINES if cmd in allowed_cmds and (not basic or cmd in BASIC)]
+    pages, cur = [], ""
+    for l in lines:  # page 1 also carries "SAFE/OMW/HELP check in."; each has "BUNKR n/m: " and "(? n next)"
+        if cur and len(cur) + 2 + len(l) > (70 if not pages else 94):
+            pages.append(cur)
+            cur = l
+        else:
+            cur = f"{cur}, {l}" if cur else l
+    if cur:
+        pages.append(cur)
+    pages = pages or [""]
+    page = min(max(page, 1), len(pages))
+    head = f"BUNKR {page}/{len(pages)}: " + ("SAFE/OMW/HELP check in. " if page == 1 else "")
+    tail = f" (? {page + 1} next)" if page < len(pages) else ""
+    return head + pages[page - 1] + tail
 
 
 def parse(text):
@@ -70,6 +123,8 @@ def parse(text):
     if not cmd:
         return None
     rest = m.group(3).strip()
+    if not m.group(1) and cmd == "menu" and rest.isdigit():
+        return cmd, rest  # "? 2": the next page
     if not m.group(1) and (rest or cmd not in BARE):
         return None
     return cmd, rest
@@ -93,6 +148,18 @@ def who(store):
     call = b["call"]
     head = f"CALL {call['label']} {call['place'] or ''}".strip() + ". " if call else ""
     return head + ", ".join(bits) if bits else "No family on BUNKR yet."
+
+
+def where(store):
+    b = checkins.board(store)
+    bits = []
+    for p in sorted(b["people"], key=lambda p: p["name"]):
+        last = p["last"]
+        if not last:
+            continue
+        place = last.get("place") or (p.get("site") or "")
+        bits.append(f"{p['name'].split()[0]} {place[:24] or '?'} {_ago(last['at'])}".strip())
+    return "; ".join(bits) if bits else "No check-ins yet."
 
 
 def _qty(i):
@@ -185,33 +252,67 @@ def used(store, person, rest):
 
 
 def answer(store, person, text, ctx):
-    """The reply to one command from a family member on the channel, or None if it isn't one."""
+    """The reply to one command from a family member on the channel: a line, a list of lines, a Later (slow: the
+    radio thread runs it in the background), or None if it isn't one."""
+    from . import meshinfo
+    key = person["uid"] if person else "unknown"
     p = parse(text)
+    if not p and person and ctx.get("news_rec") is not None:
+        n = meshinfo.news_number(key, text)  # a bare "2" right after NEWS
+        if n is not None:
+            p = ("news", str(n))
     if not p:
         return None
     cmd, rest = p
+    if cmd == "more":
+        cmd, rest = "news", "more"
     basic = ctx.get("level") == "basic"
     if basic and cmd not in BASIC:
         return None  # inventory and Home Assistant stay on the family channel
-    key = person["uid"] if person else "unknown"
+    off = set(ctx.get("off") or ())
+    if cmd in off:
+        return None
     if not allowed(("p", key), PER_PERSON) or not allowed(("all",), OVERALL):
         return None  # quietly: answering "slow down" costs airtime too
     adult = bool(person and person.get("role") == "adult")
     if cmd == "menu":
-        return MENU_BASIC if basic else MENU
+        page = int(rest) if rest.isdigit() else 1
+        return menu(page, {c for c, _ in HELP_LINES if c not in off and (c != "ask" or ctx.get("ai"))}, basic)
     if cmd == "ping":
-        return "pong" + (f" (SNR {ctx['snr']:g}, {ctx['hops']} hops)" if ctx.get("snr") is not None else "")
+        return "pong" + (f" (SNR {ctx['snr']:g}, {ctx['hops']} hops)" if ctx.get("snr") is not None and ctx.get("hops") is not None
+                         else f" (SNR {ctx['snr']:g})" if ctx.get("snr") is not None else "")
+    if cmd == "trace":
+        t = ctx.get("trace")
+        return t() if t else "Trace isn't available on this BUNKR."
     if not person:
         return None  # strangers on the channel get nothing about the family
     if cmd == "who":
         return who(store)
+    if cmd == "where":
+        if rest:
+            return have(store, rest)  # "!where water": the older meaning
+        return where(store)
     if cmd == "have":
         return have(store, rest)
     if cmd in ("add", "used"):
         if not adult:
             return "Only an adult can change the inventory from the mesh."
         return add(store, person, rest) if cmd == "add" else used(store, person, rest)
-    if cmd in ("ready", "alerts", "flight", "news", "home"):
-        fn = ctx.get(cmd)
-        return fn(rest, adult) if fn else "Not available on this BUNKR."
-    return None
+    if cmd == "news":
+        fn = ctx.get("news")
+        return fn(rest, key) if fn else "Not available on this BUNKR."
+    if cmd == "ask" and not ctx.get("ai"):
+        return "No AI is set up on this BUNKR."
+    if cmd == "alerts" and not rest:
+        cmd = "alerts_here"
+    if cmd == "flight" and not rest:
+        cmd = "flight_board"
+    fn = ctx.get(cmd)
+    if not fn:
+        return "Not available on this BUNKR."
+    if cmd == "overhead":
+        pos = ctx.get("sender_pos")
+        return Later(lambda: fn(rest, adult, pos), cmd)
+    if cmd in NET or cmd in ("alerts", "flight"):
+        return Later(lambda: fn(rest, adult), cmd)
+    return fn(rest, adult)

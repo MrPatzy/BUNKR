@@ -5,6 +5,7 @@ through a Cloudflare Tunnel; only do that with a login (Cloudflare Access) in fr
 
 import argparse
 import base64
+import hashlib
 import html
 import ipaddress
 import json
@@ -12,7 +13,6 @@ import mimetypes
 import os
 import re
 import secrets
-import shlex
 import sqlite3
 import sys
 import threading
@@ -28,9 +28,12 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from . import comms, partners, brief, flights, homeassistant, mesh, meshbot, news, checkins, chirp, family, field, notify, situation, maps as mapspack, mcp, mcp_tools, radioplan, radio, releases, scenarios
 from . import ai as aimod
+from . import meshcore, meshinfo, places, wx
 from . import packages as ospackages
+from . import packs as offpacks
 from . import foodsources, labelread
-from . import __version__, audit, auth, backup, kroger, localwatch, naming, mailer, renewals, selfupdate, homelayout, builder, dbcheck, kiwix, mfa, vault, medical, power, quickadd, recovery, drives, export, gaps, hazards, kits, library, manifest, nodes, planner, sites, sync
+from . import hostcheck, meshoffline, retention
+from . import __version__, audit, auth, backup, kroger, localwatch, naming, mailer, renewals, selfupdate, upgrader, homelayout, builder, dbcheck, kiwix, mfa, vault, medical, power, quickadd, recovery, drives, export, gaps, hazards, kits, library, manifest, nodes, planner, sites, sync
 from .depot import Depot
 from .db import COUNTS_HOME_DEFAULT, LOCATION_KINDS, SITE_KINDS, Store, guess_kind
 
@@ -67,6 +70,20 @@ OFFLINE_HEADS = {"state", "me", "board", "family", "medical", "situation", "brie
 COMMS_HEADS = {"comms", "licences", "neighbours", "nets", "net-log", "ics213", "partners", "partner-shares"}
 QUIET_CHANGES = ("/api/me/home", "/api/me/news", "/api/news/read", "/api/news/rate", "/api/notices/read")
 _pair_failures = []
+MAX_BODY = 4 * 1024 * 1024        # a JSON request body; a node's record sync may send more (MAX_SYNC_BODY)
+MAX_SYNC_BODY = 64 * 1024 * 1024
+LOGIN_IP_FAILS = 20               # failed logins from one address within LOGIN_IP_WINDOW before it has to wait
+LOGIN_IP_WINDOW = timedelta(minutes=15)
+# Content-Security-Policy by kind of page. The app and the field page load only their own scripts; printouts
+# from /api/ run no scripts except an inline print() button; files from the store (the map viewer, offline web
+# apps) only get the framing rules.
+CSP_APP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; "
+           "connect-src 'self'; frame-src 'self'; worker-src 'self'; object-src 'none'; base-uri 'self'; "
+           "form-action 'self'; frame-ancestors 'self'")
+CSP_PRINT = ("default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; script-src 'unsafe-hashes' 'sha256-"
+             + base64.b64encode(hashlib.sha256(b"print()").digest()).decode()
+             + "'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'")
+CSP_STORE = "object-src 'none'; base-uri 'self'; frame-ancestors 'self'"
 store = None
 depot = None
 notifier = None
@@ -222,6 +239,7 @@ def home_state(user):
             "contacts": store._rows("SELECT name, relation, phone, out_of_area FROM contacts ORDER BY out_of_area DESC, name"),
             "news_home": news_home(user), "home_layout": homelayout.for_user(store, user), "home_tiles": [{"id": t, "title": n, "who": w} for t, n, w in homelayout.TILES],
             "last_call": last_call_report(), "med_due": med_due_for(user), "unread": notify.unread(store, (user or {}).get("id")), "backup_status": dbcheck.status(store) if role == "admin" and ROLE not in ("pi", "laptop") else None,
+            "host_status": store.get_raw("host_status") if role == "admin" and ROLE not in ("pi", "laptop") else None,
             "library": {"ready": kiwix_ready(), "address": store.get_raw("library_url", "") or "", "port": kiwix.PORT,
                         "home": library_link("")["url"]}}
 
@@ -378,20 +396,108 @@ def kiwix_watch():
     m = KIWIX["manager"]
     if not m:
         return
-    lib = depot.root / "library"
-    seen = sorted((f.name, f.stat().st_size) for f in lib.glob("*.zim")) if lib.is_dir() else []
+    seen = sorted((f.name, f.stat().st_size) for f in kiwix.zim_files(depot.root / "library"))
     if seen != KIWIX["seen"] or (seen and not m.running()):
         KIWIX["seen"] = seen
         m.refresh()
 
 
-def cache_packages():
-    """Weekly on the hub: keep the OS packages BUNKR can use (Tesseract) in the store, for installs with no internet."""
+def cache_os_packages():
+    """Keep the OS packages BUNKR can use (Tesseract) and the ones admins added in the store, for installs with no internet."""
     try:
-        r = ospackages.cache(depot)
+        r = ospackages.cache(depot, offpacks.os_names(store))
         store.set_raw("os_packages", r | {"ok": True, "at": datetime.now(timezone.utc).isoformat(timespec="seconds")})
     except Exception as exc:
         store.set_raw("os_packages", {"ok": False, "error": str(exc)[:200], "at": datetime.now(timezone.utc).isoformat(timespec="seconds")})
+    return store.get_raw("os_packages")
+
+
+def packs_job(jb, only=None, with_os=False):
+    """Job body: the OS packages (optional) and the offline packs (all, or one)."""
+    if with_os:
+        jb.step = "OS packages"
+        jb.say("OS packages: asking apt…")
+        r = cache_os_packages()
+        jb.say(f"OS packages: {r.get('files', 0)} kept, {r.get('added', 0)} new" if r.get("ok") else f"OS packages failed: {r.get('error')}")
+        if r.get("missing"):
+            jb.say("  not found: " + ", ".join(r["missing"]))
+
+    def progress(n):
+        with jb.lock:
+            jb.bytes_done = n
+    jb.step = "Offline packs"
+    r = offpacks.refresh(store, depot, log=jb.say, progress=progress, cancelled=lambda: jb.cancelled, only=only)
+    store.set_raw("packs_last", r | {"at": datetime.now(timezone.utc).isoformat(timespec="seconds")})
+    jb.say(f"Packs: {r['ok']} fine, {r['changed']} new, {r['failed']} failed.")
+
+
+def cache_packages():
+    """Weekly on the hub: OS packages and offline packs. In the downloads job when it's free, so admins see it."""
+    if depot_job.snapshot()["state"] != "running":
+        try:
+            depot_job.start(packs_job, None, True)
+            depot_job.thread.join()
+            return
+        except RuntimeError:
+            pass
+    try:
+        packs_job(builder.Job(), None, True)
+    except Exception as exc:
+        print(f"Offline packs: {exc}")
+
+
+def packs_api(method, parts, body):
+    """/api/depot/packs/... (admins only: depot is in ADMIN_HEADS). Returns a result or raises ApiError."""
+    rest = [unquote(p) for p in parts[2:]]
+    try:
+        if method == "GET" and not rest:
+            return {"packs": offpacks.view(store, depot), "settings": offpacks.settings(store),
+                    "os": {"builtin": ospackages.OPTIONAL, "extra": offpacks.os_extra(store), "status": store.get_raw("os_packages")},
+                    "last": store.get_raw("packs_last"), "job": depot_job.snapshot(),
+                    "books": [{"name": e["name"], "flavour": e.get("flavour", ""), "label": e["why"]} for e in library.entries()]}
+        if method == "POST" and not rest:
+            return offpacks.create(store, body.get("name"), body.get("note", ""))
+        if method == "POST" and rest == ["import"]:
+            return offpacks.import_pack(store, body.get("pack"))
+        if method == "POST" and rest == ["settings"]:
+            return offpacks.save_settings(store, body)
+        if method == "POST" and rest == ["fetch"]:
+            if ROLE in ("pi", "laptop"):
+                raise ApiError(409, "packs are fetched on the home hub; this node gets them when it syncs")
+            slug = body.get("slug") or None
+            if slug:
+                offpacks.get(store, slug)
+            try:
+                depot_job.start(packs_job, slug, not slug)
+            except RuntimeError as exc:
+                raise ApiError(409, "the downloads store is busy: " + str(exc))
+            return depot_job.snapshot()
+        if method == "POST" and rest == ["os", "check"]:
+            return offpacks.check_os(store, body.get("name"))
+        if method == "POST" and rest == ["os"]:
+            return offpacks.add_os(store, body.get("name"))
+        if method == "DELETE" and len(rest) == 2 and rest[0] == "os":
+            offpacks.remove_os(store, rest[1])
+            return {"ok": True}
+        if method == "GET" and len(rest) == 2 and rest[1] == "export":
+            pack = offpacks.get(store, rest[0])
+            data = json.dumps(offpacks.export(pack), indent=1) + "\n"
+            return data, "application/json; charset=utf-8", f"bunkr-pack-{pack['slug']}.json"
+        if method == "DELETE" and len(rest) == 1:
+            offpacks.delete(store, depot, rest[0])
+            return {"ok": True}
+        if method == "POST" and len(rest) == 2 and rest[1] == "items":
+            return offpacks.add_item(store, rest[0], body)
+        if method == "DELETE" and len(rest) == 3 and rest[1] == "items":
+            offpacks.remove_item(store, depot, rest[0], rest[2])
+            return {"ok": True}
+    except LookupError as exc:
+        raise ApiError(404, str(exc).strip("'\""))
+    except ValueError as exc:
+        raise ApiError(400, str(exc))
+    except RuntimeError as exc:   # apt couldn't answer (checking an OS package)
+        raise ApiError(409, str(exc)[:200])
+    raise ApiError(404, "not found")
 
 
 def node_plan(node):
@@ -572,7 +678,7 @@ def release_catalog():
     """Firmware and apps, shaped like library rows for the Downloads tab."""
     held = releases.held_versions(depot)
     out = []
-    for r in releases.resolve_all():
+    for r in releases.resolve_all() + [meshoffline.resolve(store)]:
         hv = held.get(r["id"])
         row = None
         if hv:
@@ -599,14 +705,45 @@ def depot_view():
     return {"usage": depot.usage(), "catalog": depot.catalog(libs, tools) + release_catalog(), "files": depot.rows(),
             "job": depot_job.snapshot(), "updates": store._rows("SELECT * FROM updates ORDER BY found_at DESC LIMIT 50"),
             "documents_changed_at": store.documents_changed_at(), "auto_update": store.get_raw("auto_update", True),
-            "reader": kiwix_status(), "extra_books": kiwix_extra()}
+            "reader": kiwix_status(), "extra_books": kiwix_extra(), "pinned": sorted(retention.pins(store)),
+            "mesh_offline": {**meshoffline.settings(store), "status": meshoffline.status(store),
+                             "boards_all": {k: v["label"] for k, v in releases.BOARDS.items()}}}
+
+
+def space_view():
+    """Admins: space used, the keep-for settings, and what the next clean-up would remove (a dry run)."""
+    running = depot_job.snapshot()["state"] == "running"
+    return {"space": retention.space(store, depot), "settings": retention.settings(store),
+            "backups": retention.plan_backups(store, dbcheck.folder(store)), "store": retention.plan_store(depot, running)}
+
+
+def mesh_offline_job(jb, allow_major=False):
+    jb.step = "Refreshing the offline mesh kit"
+    jb.say(jb.step)
+    st = meshoffline.refresh(depot, store, allow_major=allow_major, cancelled=lambda: jb.cancelled)
+    if not st.get("ok"):
+        raise RuntimeError(st.get("error") or "the offline mesh kit didn't refresh")
+    jb.say(f"Offline mesh kit {st['version']}: {st['firmware_files']} firmware files, {st['wheels']} wheels, checksums verified")
+
+
+def mesh_offline_daily():
+    """4 a.m.: keep the offline mesh kit fresh within its major version (a new major waits for approval on Downloads)."""
+    if not meshoffline.settings(store)["enabled"]:
+        return
+    if depot.held(meshoffline.KIND, meshoffline.ITEM) and not store.get_raw("auto_update", True):
+        return
+    try:
+        depot_job.start(mesh_offline_job)
+    except RuntimeError:  # something else is downloading; tomorrow then
+        return
+    depot_job.thread.join()
 
 
 def fetch_into_depot(jb, wanted):
     """Job body: download chosen libraries/tools into the store."""
     libs, tools = library.resolve_all()
     by = {("library", l["id"]): l for l in libs} | {("tool", t["id"]): t for t in tools}
-    by |= {(r["kind"], r["id"]): r for r in releases.resolve_all() if r["online"]}
+    by |= {(r["kind"], r["id"]): r for r in releases.resolve_all() + [meshoffline.resolve(store)] if r["online"]}
     todo = [by[(w["kind"], w["id"])] | {"_kind": w["kind"]} for w in wanted if (w["kind"], w["id"]) in by]
     with jb.lock:
         jb.bytes_total = sum(t["size"] for t in todo)
@@ -622,7 +759,12 @@ def fetch_into_depot(jb, wanted):
                 jb.bytes_done = base + n
         for attempt in range(3):
             try:
-                if t["_kind"] in ("firmware", "app"):
+                if t["id"] == meshoffline.ITEM:
+                    st = meshoffline.refresh(depot, store, allow_major=True, cancelled=lambda: jb.cancelled)
+                    if not st.get("ok"):
+                        raise IOError(st.get("error"))
+                    jb.say(f"{t['label']}: version {st['version']} stored, checksums verified")
+                elif t["_kind"] in ("firmware", "app"):
                     v = releases.fetch(depot, t, progress, lambda: jb.cancelled)
                     jb.say(f"{t['label']}: version {v} stored, checksums verified")
                 else:
@@ -740,6 +882,8 @@ def nightly_updates():
         for w in wanted:
             store._exec("UPDATE updates SET status=?, applied_at=? WHERE kind=? AND item_id=? AND status='pending'",
                         ("applied" if snap["state"] == "done" else "failed", manifest.now(), w["kind"], w["id"]))
+    if retention.settings(store)["clean_store"] and depot_job.snapshot()["state"] != "running":
+        retention.prune_store(depot)  # old versions go only once the new one is verified, and never kept ones
 
 
 CHANNEL_FIELDS = ("name", "grp", "service", "rx_mhz", "duplex", "offset_mhz", "tone_mode", "tone_hz", "dtcs",
@@ -1068,9 +1212,20 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
-        self.send_header("X-Content-Type-Options", "nosniff")
+        self._safety_headers(ctype)
         self.end_headers()
         self.wfile.write(data)
+
+    def _safety_headers(self, ctype, has_csp=False):
+        """Sent with every answer: no MIME sniffing, no framing by other sites, no full address sent to links
+        followed out of BUNKR, and a script policy for web pages (see CSP_APP)."""
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "SAMEORIGIN")
+        self.send_header("Referrer-Policy", "same-origin")
+        if not has_csp and (ctype or "").startswith("text/html"):
+            path = urlparse(self.path).path
+            self.send_header("Content-Security-Policy",
+                             CSP_STORE if path.startswith("/store/") else CSP_PRINT if path.startswith("/api/") else CSP_APP)
 
     def _guard(self, mutating):
         # Block DNS-rebinding (foreign Host) and cross-site requests from other tabs.
@@ -1081,13 +1236,13 @@ class Handler(BaseHTTPRequestHandler):
         if mutating and self.headers.get("X-Bunkr") != "1":
             raise ApiError(403, "missing request header")
 
-    def _body(self):
-        length = int(self.headers.get("Content-Length") or 0)
-        if not length:
+    def _body(self, limit=None):
+        raw = self._read_raw(limit or MAX_BODY)
+        if not raw:
             return {}
         try:
-            return json.loads(self.rfile.read(length))
-        except json.JSONDecodeError:
+            return json.loads(raw)
+        except (json.JSONDecodeError, UnicodeDecodeError):
             raise ApiError(400, "invalid JSON")
 
     def do_GET(self):
@@ -1200,8 +1355,9 @@ class Handler(BaseHTTPRequestHandler):
             self._send(exc.status, {"error": str(exc)})
         except (FileNotFoundError, NotADirectoryError, ValueError) as exc:
             self._send(400, {"error": str(exc)})
-        except Exception as exc:  # keep the server alive; show the message in the UI
-            self._send(500, {"error": f"{type(exc).__name__}: {exc}"})
+        except Exception as exc:  # keep the server alive; show the message in the UI (to people who are logged in)
+            print(f"error on {method} {url.path}: {type(exc).__name__}: {exc}", file=sys.stderr)
+            self._send(500, {"error": f"{type(exc).__name__}: {exc}" if getattr(self, "user", None) else "something went wrong"})
 
     def _locked(self, method, url):
         """A locked node: public things (maps, library link, radio files, apps) and the unlock form. Nothing private."""
@@ -1226,6 +1382,13 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, field.page(depot.root, self.headers.get("Host"), locked=lock_note()).encode(),
                               "text/html; charset=utf-8")
         return self._redirect("/")
+
+    @staticmethod
+    def _any_sensitive(ids):
+        """Whether any of these item ids is a firearm (or other admin-only category)."""
+        marks = ",".join("?" for _ in ids)
+        return bool(ids and store._rows(f"SELECT 1 FROM items WHERE id IN ({marks}) AND category IN "
+                                        f"({','.join('?' for _ in gaps.SENSITIVE)}) LIMIT 1", (*ids, *sorted(gaps.SENSITIVE))))
 
     def _sensitive_item(self, path):
         """For /api/items/<id>...: whether that item is a firearm, looked up before a change can delete it."""
@@ -1485,7 +1648,17 @@ class Handler(BaseHTTPRequestHandler):
                      "locked for a while" if locked else msg, self._client_ip(), alert="locked" if locked else None)
         raise ApiError(401, msg)
 
+    def _login_ip_blocked(self):
+        """Many failed logins from one address (any usernames) in the last 15 minutes. Counted from the audit log,
+        so a restart doesn't reset it. The per-login lockout (auth.MAX_FAILS) still applies on top."""
+        since = (datetime.now(timezone.utc) - LOGIN_IP_WINDOW).isoformat(timespec="seconds")
+        n = store._rows("SELECT COUNT(*) AS n FROM audit_log WHERE at > ? AND action='login_failed' AND ip=?",
+                        (since, self._client_ip()[:80]))[0]["n"]
+        return n >= LOGIN_IP_FAILS
+
     def _login(self, step=""):
+        if step != "passkey-options" and self._login_ip_blocked():
+            raise ApiError(429, "too many failed logins from here; wait 15 minutes and try again")
         data = self._body()
         if step == "code":
             uid = mfa.PENDING.take(("pw", str(data.get("ticket") or "")))
@@ -1922,13 +2095,16 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
-        self.send_header("X-Content-Type-Options", "nosniff")
+        # the connector's sign-in page brings its own policy (it must be able to send the browser back to the AI app)
+        self._safety_headers(ctype if data else "", has_csp=urlparse(self.path).path.startswith("/mcp"))
         self.end_headers()
         if data:
             self.wfile.write(data)
 
     def _read_raw(self, limit=1_000_000):
-        n = int(self.headers.get("Content-Length") or 0)
+        n = _num(self.headers.get("Content-Length") or 0, int, -1)
+        if n < 0:  # a negative length would read until the sender hangs up
+            raise ApiError(400, "bad Content-Length")
         if n > limit:
             raise ApiError(413, "request too large")
         return self.rfile.read(n) if n else b""
@@ -1947,7 +2123,7 @@ class Handler(BaseHTTPRequestHandler):
             if p.startswith(("/.well-known/oauth-authorization-server", "/.well-known/openid-configuration")):
                 return js(mcp.auth_server(base))
             return js({"error": "not found"}, 404)
-        client_ok = mcp.from_assistant(self.headers.get("CF-Connecting-IP"))
+        client_ok = mcp.from_assistant(store, self.headers.get("CF-Connecting-IP"))
         try:
             if p == "/mcp/oauth/register" and method == "POST":
                 if not client_ok:
@@ -1975,7 +2151,7 @@ class Handler(BaseHTTPRequestHandler):
                     return self._raw(400, page.encode(), "text/html; charset=utf-8")
                 if method == "GET":
                     return self._raw(200, mcp.authorize_page(form, c).encode(), "text/html; charset=utf-8",
-                                     [("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self' " + " ".join(sorted(mcp.ALLOWED_ORIGINS)))])
+                                     [("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self' " + " ".join(mcp.origins(store)))])
                 try:
                     u = auth.check_password(store, form.get("username", ""), form.get("password", ""))
                     if mfa.enabled(store, u["id"]):
@@ -1994,7 +2170,7 @@ class Handler(BaseHTTPRequestHandler):
                 if method != "POST":
                     return self._raw(405, headers=[("Allow", "POST")])
                 origin = self.headers.get("Origin")
-                if (origin and origin.rstrip("/") not in (mcp.ALLOWED_ORIGINS | {base})) or not client_ok:
+                if (origin and origin.rstrip("/") not in (set(mcp.origins(store)) | {base})) or not client_ok:
                     return js({"error": "forbidden"}, 403)
                 user = mcp.bearer_user(store, self.headers.get("Authorization"))
                 if not user:
@@ -2070,12 +2246,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, {"key": base64.b64encode(hub_vault_key()).decode(),
                                         "wrapped": store.get_raw("vault_wrapped", None)})
             if (method, sub) == ("POST", "report"):
-                data = self._body()
+                data = self._body(MAX_SYNC_BODY)
                 nodes.set_fields(store, node["id"], manifest=json.dumps(data.get("manifest") or {}),
                                  last_sync=manifest.now(), last_sync_status=str(data.get("status", ""))[:200])
                 return self._send(200, {"ok": True})
             if (method, sub) == ("POST", "records"):
-                data = self._body()
+                data = self._body(MAX_SYNC_BODY)
                 since = str(data.get("since") or "")
                 # A little overlap so changes stamped in the same second are never skipped;
                 # re-sent records with an unchanged updated_at are ignored on arrival.
@@ -2215,11 +2391,14 @@ class Handler(BaseHTTPRequestHandler):
             return store.update_settings(self._body())
 
         if head == "items":
+            admin = self.user["role"] == "admin"
             if method == "POST" and len(parts) == 2 and parts[1] == "move":
                 data = self._body()
                 ids = [_num(i, int, None) for i in data.get("ids", [])]
                 if not ids or None in ids:
                     raise ApiError(400, "choose items to move")
+                if not admin and self._any_sensitive(ids):
+                    raise ApiError(404, "no such item")
                 loc = resolve_location(data)
                 store.move_items(ids, loc)
                 return {"ok": True, "moved": len(ids)}
@@ -2235,8 +2414,12 @@ class Handler(BaseHTTPRequestHandler):
                 store._exec("UPDATE items SET quantity=MAX(0, quantity + ?), updated_at=? WHERE id=?",
                             (amount, datetime.now(timezone.utc).isoformat(timespec="seconds"), row_id))
                 return {"quantity": store._rows("SELECT quantity FROM items WHERE id=?", (row_id,))[0]["quantity"]}
+            if method in ("POST", "DELETE") and row_id and not admin and self._any_sensitive([row_id]):
+                raise ApiError(404, "no such item")  # firearms are admin-only: a family login can't see, change or delete them
             if method == "POST":
                 body = self._body()
+                if not admin and body.get("category") in gaps.SENSITIVE:
+                    raise ApiError(403, "only an admin can add firearms and ammunition")
                 saved = store.save_item(clean_item(body), row_id)
                 if body.get("barcode"):
                     try:
@@ -2302,7 +2485,7 @@ class Handler(BaseHTTPRequestHandler):
             st = full_state(self.user)
             return export.shopping_html(st["shopping"]), "text/html; charset=utf-8"
         if (method, head) == ("GET", "shopping.csv"):
-            return export.shopping_csv(full_state()["shopping"]), "text/csv; charset=utf-8"
+            return export.shopping_csv(full_state(self.user)["shopping"]), "text/csv; charset=utf-8"
         if method == "GET" and head == "packing" and row_id:
             loc = store.location(row_id)
             if not loc:
@@ -2336,6 +2519,13 @@ class Handler(BaseHTTPRequestHandler):
                 return chirp.status(depot)
         if head == "depot":
             sub = parts[1] if len(parts) > 1 else ""
+            if sub == "packs":
+                body = self._body() if method == "POST" else {}
+                res = packs_api(method, parts, body if isinstance(body, dict) else {})
+                if isinstance(res, tuple):
+                    self._extra.append(("Content-Disposition", f'attachment; filename="{res[2]}"'))
+                    return res[:2]
+                return res
             if method == "GET" and not sub:
                 return depot_view()
             if method == "GET" and sub == "job":
@@ -2366,6 +2556,32 @@ class Handler(BaseHTTPRequestHandler):
             if method == "POST" and sub == "settings":
                 store.set_raw("auto_update", bool(self._body().get("auto_update")))
                 return {"auto_update": store.get_raw("auto_update", True)}
+            if method == "GET" and sub == "space":
+                return space_view()
+            if method == "POST" and sub == "retention":
+                try:
+                    retention.save_settings(store, self._body())
+                except ValueError as exc:
+                    raise ApiError(400, str(exc))
+                return space_view()
+            if method == "POST" and sub == "clean":
+                if depot_job.snapshot()["state"] == "running":
+                    raise ApiError(409, "the downloads store is busy; try again when it's done")
+                gone = retention.prune_backups(store, dbcheck.folder(store))
+                plan = retention.prune_store(depot)
+                return space_view() | {"removed": sum(r["action"] == "delete" for r in gone) + len(plan["delete"])}
+            if method == "POST" and sub == "pin":
+                data = self._body()
+                rows = store._rows("SELECT * FROM depot_files WHERE id=?", (_num(data.get("id"), int, -1),))
+                if not rows:
+                    raise ApiError(404, "no such file")
+                return {"pinned": retention.set_pin(store, rows[0]["kind"], rows[0]["item_id"], rows[0]["version"],
+                                                    bool(data.get("keep")))}
+            if method == "POST" and sub == "mesh-offline":
+                try:
+                    return meshoffline.save_settings(store, self._body())
+                except ValueError as exc:
+                    raise ApiError(400, str(exc))
             if method == "POST" and sub == "updates" and len(parts) == 4 and parts[3] == "approve":
                 upd = store._rows("SELECT * FROM updates WHERE id=?", (_num(parts[2], int, -1),))
                 if not upd:
@@ -2614,6 +2830,15 @@ class Handler(BaseHTTPRequestHandler):
                     return selfupdate.save_settings(store, self._body())
                 except ValueError as exc:
                     raise ApiError(400, str(exc))
+            if method == "POST" and parts[1:] == ["upgrade"]:
+                # writes a request for the root-owned bunkr-upgrade service; this process never installs anything
+                b = self._body()
+                try:
+                    upgrader.request_upgrade(selfupdate.view(store)["upgrade"], str(b.get("version") or ""),
+                                             self.user["username"], b.get("confirm_major") is True)
+                except (ValueError, OSError) as exc:
+                    raise ApiError(400, str(exc))
+                return selfupdate.view(store)
         if head == "ai":
             if method == "GET":
                 return aimod.view(store)
@@ -2919,7 +3144,8 @@ class Handler(BaseHTTPRequestHandler):
         if head == "nodes":
             if method == "GET" and not row_id:
                 return {"nodes": nodes_view(), "roles": nodes.ROLES, "defaults": nodes.DEFAULT_PROFILES,
-                        "lock_passphrase_set": store.get_raw("vault_wrapped_at", "") or ""}
+                        "lock_passphrase_set": store.get_raw("vault_wrapped_at", "") or "",
+                        "packs": [{"slug": p["slug"], "name": p["name"]} for p in offpacks.all_packs(store)]}
             if method == "POST" and parts[1:2] == ["lock-passphrase"]:
                 data = self._body()
                 if data.get("passphrase") != data.get("repeat"):
@@ -3189,14 +3415,104 @@ def bot_context():
             out.append(bit)
         return "; ".join(out)
 
-    def news_(rest, adult):
-        rec = brief.latest(store)
-        return brief.one_line(rec) if rec else "No brief yet."
-
     def home(rest, adult):
         return homeassistant.home_command(store, Path(store.path).parent, rest, adult)
 
-    return {"ready": ready, "alerts": alerts, "flight": flight, "news": news_, "home": home}
+    folder = geo_folder()
+    home_site = next((x for x in store.sites() if x["kind"] == "home" and x.get("lat") is not None), None)
+    home_place = None
+    if home_site:
+        st = (home_site.get("state") or "").upper()
+        st = st if st in places.STATES else ""
+        home_place = {"lat": home_site["lat"], "lon": home_site["lon"], "label": home_site["name"][:24], "state": st,
+                      "tz": places.STATE_TZ.get(st) or BRIEF["tz"], "kind": "home"}
+    ctx = {"geo_folder": folder, "home": home_place or {}}
+    ai_on = aimod.summaries_on(store)
+
+    def news_(rest, key):
+        return meshinfo.news(brief.latest(store), key, rest)
+
+    def flight_lookup(rest, adult):
+        key = flights.load_key(Path(store.path).parent)
+        def can_use():
+            if flights.lookups_this_month(store) >= flights.MONTHLY_CAP:
+                return False
+            flights._count_lookup(store)
+            return True
+        return meshinfo.flight(ctx, rest, flights, fa_key=key, can_use_fa=can_use)
+
+    return {"ready": ready, "alerts_here": alerts, "flight_board": flight, "news": news_, "news_rec": brief.latest(store) or {},
+            "home": home,
+            "alerts": lambda rest, adult: meshinfo.place_alerts(ctx, rest, situation.items(store)),
+            "wx": lambda rest, adult: meshinfo.weather(ctx, rest),
+            "sun": lambda rest, adult: meshinfo.sun(ctx, rest),
+            "quake": lambda rest, adult: meshinfo.quake(ctx, rest),
+            "space": lambda rest, adult: meshinfo.space(ctx, rest),
+            "overhead": lambda rest, adult, pos=None: meshinfo.overhead({**ctx, "sender_pos": pos}, rest),
+            "flight": flight_lookup,
+            "ask": (lambda rest, adult: meshinfo.ask(lambda prompt: aimod.reply(store, prompt, timeout=120), rest)) if ai_on else None,
+            "ai": ai_on}
+
+
+def geo_folder():
+    return (depot.root / "geo") if depot is not None else Path(store.path).parent / "store" / "geo"
+
+
+def geo_refresh():
+    """Once a year: the Census ZIP code and town list for the mesh bot's place lookups (bunkr/places.py)."""
+    folder = geo_folder()
+    if places.needs_refresh(folder):
+        places.refresh(folder)
+
+
+def mesh_brief_tick(now_=None):
+    """The daily mesh brief, once its time has come (settings "brief_at"), on the family channels."""
+    link = MESH.get("link")
+    if not link:
+        return None
+    s = mesh.settings(store)
+    if not (s["enabled"] and s["brief_at"]):
+        return None
+    import zoneinfo
+    try:
+        tz = zoneinfo.ZoneInfo(BRIEF["tz"])
+    except Exception:
+        tz = timezone.utc
+    local = (now_ or datetime.now(timezone.utc)).astimezone(tz)
+    day = local.date().isoformat()
+    if local.strftime("%H:%M") < s["brief_at"] or store.get_raw("mesh_brief_day", "") == day:
+        return None
+    store.set_raw("mesh_brief_day", day)
+    lines = mesh_brief_lines(local)
+    for ch in s["channels"]:
+        if ch["kind"] == "family" and ch["alerts"] != "off":
+            for line in lines:
+                link.queue(ch["index"], line)
+    return lines
+
+
+def mesh_brief_lines(local):
+    """'BUNKR Mon: 44/25 M cldy. Alerts: none near us.' + 'News: 1 COP31 talks collapse. 2 ... # for story'"""
+    head = f"BUNKR {local.strftime('%a %-m/%-d')}:"
+    bits = []
+    home_site = next((x for x in store.sites() if x["kind"] == "home" and x.get("lat") is not None), None)
+    if home_site:
+        try:
+            props = wx.point(home_site["lat"], home_site["lon"])
+            day = wx.days("", props, 1)
+            if day:
+                bits.append(day[0].split(" ", 1)[1] if day[0].startswith(("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun", "Tngt")) else day[0])
+        except Exception:
+            pass
+    top = [i for i in situation.items(store) if i["tier"] in ("flash", "priority")]
+    bits.append(f"{len(top)} alert{'s' if len(top) != 1 else ''}: {top[0]['title'][:40]}" if top else "No alerts near us")
+    first = meshcore.fit(f"{head} " + ". ".join(bits) + ".", 120)
+    st = meshinfo.stories(brief.latest(store))[:3]
+    if not st:
+        return [first]
+    news = "News: " + " ".join(f"{i + 1} {x['short']}." for i, x in enumerate(st)) + " NEWS # for more"
+    return [first, meshcore.fit(news, 120)]
+
 
 
 def setup_mesh():
@@ -3204,8 +3520,9 @@ def setup_mesh():
     if MESH["link"] is None:
         MESH["link"] = mesh.Link(lambda: store, ctx=bot_context)
         MESH["link"].start()
-    if MESH["link"] not in checkins.listeners:
-        checkins.listeners.append(MESH["link"])
+    for listeners in (checkins.listeners, situation.listeners, flights.listeners, news.listeners):
+        if MESH["link"] not in listeners:
+            listeners.append(MESH["link"])  # alerts go to the mesh per channel (bunkr/mesh.py alert_text)
     if MESH.get("ha") is None:
         MESH["ha"] = homeassistant.Events(lambda: store, lambda: Path(store.path).parent)
     for listeners in (checkins.listeners, situation.listeners, flights.listeners):
@@ -3231,7 +3548,8 @@ def setup_notifier():
 
     notifier = notify.Notifier(store, folder / "vapid.pem", enabled, mail=mail)
     for listeners in (checkins.listeners, situation.listeners, medical.listeners, audit.listeners, flights.listeners,
-                      renewals.listeners, comms.listeners, news.listeners, localwatch.listeners, selfupdate.listeners):
+                      renewals.listeners, comms.listeners, news.listeners, localwatch.listeners, selfupdate.listeners,
+                      hostcheck.listeners):
         if notifier not in listeners:
             listeners[:] = [l for l in listeners if not isinstance(l, notify.Notifier)] + [notifier]  # others (mesh) stay
 
@@ -3329,6 +3647,10 @@ def start_background():
     scheduler.every("chirp", 3600, chirp_nightly, at_hour=3)
     if ROLE == "hub":
         scheduler.every("os-packages", 7 * 86400, cache_packages, first_delay=600)
+        scheduler.every("mesh-offline", 3600, mesh_offline_daily, at_hour=4)
+        scheduler.every("geo", 86400, geo_refresh, first_delay=300)
+    if ROLE in ("hub", "standalone"):
+        scheduler.every("host-check", 3600, lambda: hostcheck.check(store), first_delay=45)
     scheduler.every("publish", 3600, publish_generated, first_delay=30)
     if not LOCK["on"]:  # a locked node's database lives only in its vault; no plain copies
         scheduler.every("db-backup", 3600, lambda: dbcheck.nightly(store), at_hour=2)
@@ -3339,6 +3661,7 @@ def start_background():
     scheduler.every("mail", 300, lambda: mailer.flush(store, Path(store.path).parent), first_delay=60)
     if KIWIX["manager"]:
         scheduler.every("kiwix", 60, kiwix_watch, first_delay=5)
+    scheduler.every("mesh-brief", 120, mesh_brief_tick, first_delay=120)
     if ROLE not in ("pi", "laptop"):
         scheduler.every("situation", 600, refresh_situation, first_delay=40)
         scheduler.every("brief", 600, make_brief, first_delay=90)
@@ -3369,10 +3692,11 @@ def main():
     ap.add_argument("--no-brief", action="store_true", help="don't make a morning brief")
     ap.add_argument("--no-brief-ai", action="store_true", help="never use AI, even when it's turned on in the app")
     ap.add_argument("--ai-env-file", "--brief-env-file", dest="ai_env_file", default="", metavar="FILE",
-                    help="optional AI: login file for the command-line AI tool (default: ai.env or claude.env next to the database)")
+                    help="optional AI: login file for the command-line AI tool (default: ai.env next to the database)")
     ap.add_argument("--ai-cli", default="", metavar="COMMAND",
-                    help="optional AI: a command that reads a prompt on stdin and prints the reply (default: Claude Code, tools off)")
-    ap.add_argument("--claude", default="", help=argparse.SUPPRESS)   # older name for --ai-cli's program
+                    help="optional AI: a command that reads a prompt on stdin and prints the reply "
+                         "(default: a BUNKR_AI_CLI= line in the login file, else none)")
+    ap.add_argument(aimod.LEGACY_FLAG, dest="legacy_cli", default="", help=argparse.SUPPRESS)   # older option: the program only
     ap.add_argument("--public-url", default="", metavar="URL",
                     help="public address of this BUNKR for the optional AI connector, e.g. https://bunkr.example.org")
     ap.add_argument("--open-net", action="append", default=[], metavar="CIDR",
@@ -3394,8 +3718,7 @@ def main():
     PUBLIC_URL = args.public_url.strip()
     BRIEF.update(enabled=not args.no_brief, ai=not args.no_brief_ai, tz=args.brief_tz,
                  time=args.brief_time if re.fullmatch(r"\d\d:\d\d", args.brief_time) else "06:30")
-    aimod.CLI.update(env_file=args.ai_env_file,
-                     command=args.ai_cli or (aimod.DEFAULT_CLI.replace("claude", shlex.quote(args.claude), 1) if args.claude else aimod.DEFAULT_CLI))
+    aimod.configure(args.ai_cli, args.ai_env_file, args.legacy_cli)
     if args.bind not in ("127.0.0.1", "localhost", "::1") and not args.require_login:
         print("WARNING: listening beyond this computer without --require-login; firewall the port.")
     global depot

@@ -27,6 +27,20 @@ PORT = 8080
 URL = f"http://127.0.0.1:{PORT}"
 
 
+def zim_files(lib_dir):
+    """The store's books: library/*.zim, then books in offline packs (packs/<pack>/*.zim) not already in the library."""
+    lib_dir = Path(lib_dir)
+    own = sorted(lib_dir.glob("*.zim")) if lib_dir.is_dir() else []
+    names = {z.name for z in own}
+    packs = lib_dir.parent / "packs"
+    extra = [z for z in sorted(packs.glob("*/*.zim")) if not z.parent.name.startswith(".")] if packs.is_dir() else []
+    for z in extra:
+        if z.name not in names:
+            names.add(z.name)
+            own.append(z)
+    return own
+
+
 def build_library(lib_dir, state_dir, manage="kiwix-manage"):
     """library.xml from every readable *.zim. Returns (count, skipped names). Written next to the old one, then swapped."""
     lib_dir, state_dir = Path(lib_dir), Path(state_dir)
@@ -34,7 +48,7 @@ def build_library(lib_dir, state_dir, manage="kiwix-manage"):
     new = state_dir / "library.xml.new"
     new.unlink(missing_ok=True)
     count, skipped = 0, []
-    for zim in sorted(lib_dir.glob("*.zim")) if lib_dir.is_dir() else []:
+    for zim in zim_files(lib_dir):
         r = subprocess.run([manage, str(new), "add", str(zim)], capture_output=True, timeout=120)
         if r.returncode == 0:
             count += 1

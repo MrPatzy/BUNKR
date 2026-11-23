@@ -1,0 +1,4 @@
+#!/bin/sh
+# BUNKR's command line, for a .deb install. Run it as the bunkr user, for example:
+#   sudo -u bunkr bunkr --db /var/lib/bunkr/bunkr.db user add NAME --admin
+PYTHONPATH=/usr/lib/bunkr exec /usr/bin/python3 -m bunkr "$@"

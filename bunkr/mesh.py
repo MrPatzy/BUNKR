@@ -18,6 +18,10 @@
 - Going out on the channel: family calls ("BUNKR CALL: Evacuate to Grandma's. Reply SAFE, OMW or HELP"), all clear,
   and anyone who checks in "Need help" in the app. Each mesh check-in gets a short reply so the sender knows BUNKR
   heard it. Nothing a check-in from the mesh causes is sent back out again (no loops).
+- Alerts go out too, per channel ("alerts"): all = situation flash and priority alerts, family flight changes and
+  early news; flash = only flash alerts; off. Outside flash alerts they wait out quiet hours (22:00-06:30), the same
+  one is never sent twice, and a channel gets at most ALERTS_PER_HOUR of them. Reminders never go to the mesh.
+- A short daily mesh brief (weather at home, alerts, top headlines) at the time an admin picks, on family channels.
 - Each radio is set up on the node it's plugged into (a Heltec on Wi-Fi can be reached by the hub over TCP).
   Check-ins it makes travel to the others with the normal record sync, marked "via MeshCore".
 """
@@ -34,12 +38,18 @@ from datetime import datetime, timezone
 
 from . import checkins, meshbot, meshcore
 
-DEFAULTS = {"enabled": False, "connect": "", "channels": []}
+import collections
+
+DEFAULTS = {"enabled": False, "connect": "", "channels": [], "bot_off": [], "brief_at": ""}
+ALERT_LEVELS = {"all": "Alerts, flights and early news", "flash": "Only flash alerts", "off": "No alerts"}
+ALERTS_PER_HOUR = 6
+QUIET = ("22:00", "06:30")
+SEND_GAP = 2.0      # seconds between our own messages, so a 3-part answer doesn't jam the channel
 KINDS = {"family": "Family (the household)", "group": "Trusted group"}
 BOT_LEVELS = {"full": "Every command", "basic": "WHO ALERTS FLIGHT NEWS PING only", "off": "No commands"}
 CHANNEL = {  # a new channel of each kind starts like this
-    "family": {"checkins": True, "bot": "full", "send_calls": True, "send_help": True, "reply": True, "shared": True},
-    "group": {"checkins": True, "bot": "basic", "send_calls": False, "send_help": True, "reply": True, "shared": False},
+    "family": {"checkins": True, "bot": "full", "send_calls": True, "send_help": True, "reply": True, "shared": True, "alerts": "all"},
+    "group": {"checkins": True, "bot": "basic", "send_calls": False, "send_help": True, "reply": True, "shared": False, "alerts": "flash"},
 }
 MAX_CHANNELS = 6
 WORDS = {
@@ -65,9 +75,11 @@ def _channel(c):
           **CHANNEL[kind]}
     for k in CHANNEL[kind]:
         if k in c:
-            ch[k] = c[k] if k == "bot" else bool(c[k])
+            ch[k] = c[k] if k in ("bot", "alerts") else bool(c[k])
     if ch["bot"] not in BOT_LEVELS:
         ch["bot"] = CHANNEL[kind]["bot"]
+    if ch["alerts"] not in ALERT_LEVELS:
+        ch["alerts"] = CHANNEL[kind]["alerts"]
     return ch
 
 
@@ -79,6 +91,8 @@ def settings(store):
         s = {}
     out = {**DEFAULTS, **{k: v for k, v in s.items() if k in DEFAULTS}}
     out["channels"] = [_channel(c) for c in out["channels"] if isinstance(c, dict)]
+    out["bot_off"] = [c for c in out["bot_off"] if c in meshbot.SWITCHABLE] if isinstance(out["bot_off"], list) else []
+    out["brief_at"] = out["brief_at"] if isinstance(out["brief_at"], str) and re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", out["brief_at"]) else ""
     return out
 
 
@@ -137,6 +151,8 @@ def _clean_channel(c, old):
             raise ValueError(f"{name}: {exc}")
     if c.get("bot", CHANNEL[kind]["bot"]) not in BOT_LEVELS:
         raise ValueError(f"{name}: commands are full, basic or off")
+    if c.get("alerts", CHANNEL[kind]["alerts"]) not in ALERT_LEVELS:
+        raise ValueError(f"{name}: alerts are all, flash or off")
     return _channel({**CHANNEL[kind], **{k: c[k] for k in CHANNEL[kind] if k in c}, "name": name, "index": index,
                      "secret": secret, "kind": kind})
 
@@ -150,6 +166,16 @@ def save_settings(store, data):
         if c and not (re.fullmatch(r"/dev/[\w./-]{1,60}", c) or re.fullmatch(r"tcp:[\w.-]{1,100}(:\d{1,5})?", c)):
             raise ValueError("connect to a serial port (/dev/ttyUSB0) or tcp:host:port (tcp:192.168.1.60:5000)")
         s["connect"] = c
+    if "bot_off" in data:
+        off = data["bot_off"]
+        if not isinstance(off, list) or any(c not in meshbot.SWITCHABLE for c in off):
+            raise ValueError("unknown bot command")
+        s["bot_off"] = sorted(set(off))
+    if "brief_at" in data:
+        t = str(data["brief_at"] or "").strip()
+        if t and not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", t):
+            raise ValueError("the daily mesh brief time is like 07:00 (or empty for none)")
+        s["brief_at"] = t
     if "channels" in data:
         rows = data["channels"]
         if not isinstance(rows, list) or len(rows) > MAX_CHANNELS:
@@ -328,9 +354,37 @@ def recent(store, n=30):
     return store._rows("SELECT at, direction, sender, text, result, channel FROM mesh_log ORDER BY id DESC LIMIT ?", (n,))
 
 
+def node_pos(store, name, max_age_days=14):
+    """(lat, lon) a node with this name last shared in its advert, if recent and only one node has the name."""
+    rows = store._rows("SELECT lat, lon, last_seen FROM mesh_nodes WHERE lower(name)=? AND lat IS NOT NULL AND lon IS NOT NULL",
+                       ((name or "").strip().lower(),))
+    if len(rows) != 1 or (rows[0]["lat"] == 0 and rows[0]["lon"] == 0):
+        return None
+    try:
+        age = (datetime.now(timezone.utc) - datetime.fromisoformat(rows[0]["last_seen"])).days
+    except (TypeError, ValueError):
+        age = 0
+    return (rows[0]["lat"], rows[0]["lon"]) if age <= max_age_days else None
+
+
+def path_names(store, ids):
+    """Repeater IDs from a packet's path (the start of each one's public key, as hex) -> names. Repeaters and room
+    servers are looked for first; when two share an ID the most recently heard is named, with a "?"."""
+    out = []
+    for h in ids:
+        rows = store._rows("SELECT name, node_type FROM mesh_nodes WHERE public_key LIKE ? AND name != '' "
+                           "ORDER BY (node_type IN (2, 3)) DESC, max(last_heard, last_seen) DESC", (h.lower() + "%",))
+        rep_rows = [r for r in rows if r["node_type"] in (2, 3)] or rows
+        if not rep_rows:
+            out.append(h.upper())
+        else:
+            out.append(rep_rows[0]["name"][:20] + ("?" if len(rep_rows) > 1 else ""))
+    return out
+
+
 def handle(store, msg, s, ctx=None):
-    """One message from the radio. Returns the reply to send on the same channel, or None.
-    ctx: what the bot can look up (bunkr/meshbot.py), or None for check-ins only."""
+    """One message from the radio. Returns the reply to send on the same channel (a line, a list of lines or a
+    meshbot.Later), or None. ctx: what the bot can look up (bunkr/meshbot.py), or None for check-ins only."""
     ch = channel(s, msg.get("channel")) if msg.get("kind") == "channel" else None
     if not ch:
         return None  # the public channel, others' channels and direct messages: not ours
@@ -340,11 +394,19 @@ def handle(store, msg, s, ctx=None):
     meaning = interpret(body) if ch["checkins"] else None
     if not meaning:
         if ch["bot"] != "off" and ctx is not None:
-            reply = meshbot.answer(store, person_for(store, sender), body,
-                                   {**ctx, "snr": msg.get("snr"), "hops": msg.get("path_len"), "level": ch["bot"]})
+            hops = meshcore.hops(msg.get("path_len"))
+            extra = {"snr": msg.get("snr"), "hops": hops, "level": ch["bot"], "off": s.get("bot_off") or [],
+                     "sender_pos": node_pos(store, sender) if sender else None}
+            heard = msg.get("heard")  # the raw packet, when the radio's log caught it (bunkr.mesh.Link)
+            me = (ctx.get("me") or "BUNKR")
+            if heard is not None or hops is not None:
+                extra["trace"] = lambda: meshinfo_trace(store, heard, sender, me, msg.get("snr"), hops)
+            reply = meshbot.answer(store, person_for(store, sender), body, {**ctx, **extra})
             if reply:
                 log(store, "in", body, sender, "command", channel=name)
-                return meshcore.fit(reply, 120)
+                if isinstance(reply, meshbot.Later):
+                    return reply
+                return [meshcore.fit(r, 120) for r in reply] if isinstance(reply, list) else meshcore.fit(reply, 120)
         log(store, "in", body, sender, "chat", channel=name)
         return None
     if meaning["drill"] and not meaning["status"]:
@@ -369,7 +431,36 @@ def handle(store, msg, s, ctx=None):
     return f"Got it: {p['name']} {said}.{batt}" if ch["reply"] else None
 
 
+def meshinfo_trace(store, heard, sender, me, snr, hops):
+    from . import meshinfo
+    names = path_names(store, heard["path"]) if heard else []
+    rssi = heard.get("rssi") if heard else None
+    return meshinfo.trace(names, sender, me, snr=heard.get("snr", snr) if heard else snr, rssi=rssi,
+                          hops=len(heard["path"]) if heard else hops)
+
+
 # ---------- going out ----------
+def _quiet(at=None):
+    t = (at or datetime.now()).strftime("%H:%M")
+    start, end = QUIET
+    return t >= start or t < end
+
+
+def alert_text(event, data):
+    """(level, text) for an alert-type event: level is "flash" or "all", or None when it isn't one for the mesh."""
+    if event == "situation" and data.get("tier") in ("flash", "priority"):
+        where = (f" at {data['site']}" if data.get("km") == 0 else f" {round(data['km'] * 0.621)}mi from {data['site']}") \
+            if data.get("site") and data.get("km") is not None else ""
+        tag = "FLASH" if data["tier"] == "flash" else "ALERT"
+        return ("flash" if data["tier"] == "flash" else "all"), meshcore.fit(f"BUNKR {tag}: {data.get('title', '')}{where}", 120)
+    if event == "flight" and data.get("title"):
+        body = f" {data['body']}" if data.get("body") else ""
+        return "all", meshcore.fit(f"BUNKR FLIGHT: {data['title']}.{body}", 120)
+    if event == "news" and data.get("user_ids") is None and data.get("title"):
+        return "all", meshcore.fit(f"BUNKR NEWS: {data['title']}", 120)
+    return None
+
+
 def outgoing(event, data, s):
     """What to put on a channel for a BUNKR event, or None. s: that channel's settings."""
     if event == "call" and s["send_calls"]:
@@ -395,6 +486,8 @@ class Link:
         self._store, self.connect, self.poll_every, self.ctx = store, connect, poll_every, ctx
         self.outbox = []
         self.lock = threading.Lock()
+        self.rx = collections.deque(maxlen=40)        # (monotonic, packet) for group messages the radio heard
+        self.alerts_sent = {}                         # channel index -> [(monotonic, tag)]
         self.status = {"state": "off", "error": "", "radio": {}, "since": "", "heard": ""}
         self.stop_flag = threading.Event()
         self.thread = None
@@ -404,14 +497,48 @@ class Link:
         return self._store() if callable(self._store) else self._store
 
     def __call__(self, event, data):
-        """Listener for check-ins and calls."""
+        """Listener for check-ins and calls, and for alerts (situation, flights, early news)."""
         s = settings(self.store)
         if not s["enabled"]:
             return
+        alert = alert_text(event, data) if event in ("situation", "flight", "news") else None
         for ch in s["channels"]:
+            if alert:
+                self.send_alert(ch, event, data, *alert)
+                continue
             text = outgoing(event, data, ch)
             if text:
                 self.queue(ch["index"], text)
+
+    def send_alert(self, ch, event, data, level, text, at=None, mono=None):
+        if ch.get("alerts", "off") == "off" or (ch["alerts"] == "flash" and level != "flash"):
+            return False
+        if level != "flash" and _quiet(at):
+            return False
+        mono = mono if mono is not None else time.monotonic()
+        tag = data.get("uid") or data.get("tag") or text
+        sent = [(t, g) for t, g in self.alerts_sent.get(ch["index"], []) if mono - t < 86400]
+        if any(g == (event, tag) for _, g in sent) or sum(1 for t, _ in sent if mono - t < 3600) >= ALERTS_PER_HOUR:
+            self.alerts_sent[ch["index"]] = sent
+            return False
+        self.alerts_sent[ch["index"]] = sent + [(mono, (event, tag))]
+        self.queue(ch["index"], text)
+        return True
+
+    def queue_reply(self, index, reply):
+        """A reply from handle(): a line, lines, or a Later run on its own thread."""
+        if isinstance(reply, meshbot.Later):
+            def run():
+                try:
+                    got = reply.run()
+                except Exception as exc:
+                    got = f"Couldn't get that ({type(exc).__name__})."
+                for line in ([got] if isinstance(got, str) else list(got or [])):
+                    self.queue(index, meshcore.fit(line, 120))
+            threading.Thread(target=run, name="mesh-answer", daemon=True).start()
+            return
+        for line in ([reply] if isinstance(reply, str) else reply):
+            self.queue(index, line)
 
     def queue(self, index, text):
         with self.lock:
@@ -459,6 +586,25 @@ class Link:
                 if conn:
                     conn.close()
 
+    def heard_packet(self, s, m, now_=None):
+        """The raw packet the radio heard for this channel message: same channel and number of hops, in the last
+        30 seconds, newest first. None when the log didn't catch it."""
+        ch = channel(s, m.get("channel"))
+        if not ch:
+            return None
+        try:
+            want = meshcore.channel_hash(bytes.fromhex(ch["secret"]))
+        except ValueError:
+            return None
+        hops = meshcore.hops(m.get("path_len"))
+        now_ = now_ if now_ is not None else time.monotonic()
+        for t, pk in reversed(self.rx):
+            if now_ - t > 30:
+                break
+            if pk["payload"][0] == want and (hops is None or len(pk["path"]) == hops):
+                return pk
+        return None
+
     def refresh_nodes(self, radio):
         """Read the radio's contact list (only what changed since last time) into BUNKR's nodes."""
         try:
@@ -479,6 +625,11 @@ class Link:
             if now_s != s:  # settings changed: reconnect and set the channel up again
                 return
             pushed = radio.conn.poll(1.0)
+            for p in pushed:
+                if p["type"] == meshcore.LOG_RX and p.get("raw"):
+                    pk = meshcore.packet(p["raw"])
+                    if pk and pk["type"] == meshcore.GRP_TXT and pk["payload"]:
+                        self.rx.append((time.monotonic(), {**pk, "snr": p.get("snr"), "rssi": p.get("rssi")}))
             new = [p for p in pushed if p["type"] == meshcore.PUSH_NEW_ADVERT and not p.get("bad")]
             if new:
                 save_nodes(self.store, new)
@@ -493,13 +644,18 @@ class Link:
                 last_poll = time.monotonic()
             for m in msgs:
                 self.status["heard"] = now()
+                if m.get("kind") == "channel":
+                    m["heard"] = self.heard_packet(s, m)
                 try:
-                    reply = handle(self.store, m, s, self.ctx() if self.ctx else None)
+                    ctx = self.ctx() if self.ctx else None
+                    if ctx is not None:
+                        ctx["me"] = (self.status.get("radio") or {}).get("name") or "BUNKR"
+                    reply = handle(self.store, m, s, ctx)
                 except Exception as exc:
                     reply = None
                     log(self.store, "in", m.get("text", ""), "", f"couldn't use it: {type(exc).__name__}")
                 if reply:
-                    self.queue(m.get("channel"), reply)
+                    self.queue_reply(m.get("channel"), reply)
             with self.lock:
                 out, self.outbox = self.outbox, []
             names = {c["index"]: c["name"] for c in s["channels"]}
@@ -507,6 +663,8 @@ class Link:
                 if index not in names:
                     continue  # that channel was removed
                 try:
+                    if i:
+                        self.stop_flag.wait(SEND_GAP)
                     radio.send_text(index, text)
                     log(self.store, "out", text, "", "sent", channel=names[index])
                 except Exception:
@@ -520,8 +678,9 @@ def view(store, link, admin=True):
     s = settings(store)
     chans = [{**c, "link": channel_link(c)} for c in s["channels"] if admin or c["shared"]]
     if not admin:
-        return {"channels": [{k: c[k] for k in ("name", "link", "kind", "bot")} for c in chans],
+        return {"channels": [{k: c[k] for k in ("name", "link", "kind", "bot")} for c in chans], "bot_off": s["bot_off"],
                 "status": {"state": (dict(link.status) if link else {}).get("state", "off")}, "words": {k: v[:4] for k, v in WORDS.items()}}
     return {"settings": {k: v for k, v in s.items() if k != "channels"}, "channels": chans, "kinds": KINDS, "bot_levels": BOT_LEVELS,
+            "alert_levels": ALERT_LEVELS, "switchable": meshbot.SWITCHABLE, "bot_off": s["bot_off"],
             "defaults": CHANNEL, "status": dict(link.status) if link else {"state": "off"}, "nodes": nodes(store),
             "log": recent(store), "words": {k: v[:4] for k, v in WORDS.items()}}

@@ -13,12 +13,13 @@ from datetime import date, datetime, timedelta, timezone
 
 ROLES = {"hub": "Home hub", "pi": "Pi field node", "laptop": "Storage laptop", "drive": "USB kit drive"}
 
+# "packs": offline packs (packs.py): True for all of them, False for none, or a list of pack slugs
 DEFAULT_PROFILES = {
-    "hub": {"documents": True, "readers": True, "tiers": [1, 2, 3], "maps": True, "firmware": True, "radio": True, "apps": True, "plan": True},
-    "pi": {"documents": True, "readers": False, "tiers": [1, 2, 3], "maps": True, "firmware": True, "radio": True, "apps": True, "plan": True},
-    "laptop": {"documents": True, "readers": True, "tiers": [1, 2, 3], "maps": True, "firmware": True, "radio": True, "apps": True, "plan": True},
+    "hub": {"documents": True, "readers": True, "tiers": [1, 2, 3], "maps": True, "firmware": True, "radio": True, "apps": True, "plan": True, "packs": True},
+    "pi": {"documents": True, "readers": False, "tiers": [1, 2, 3], "maps": True, "firmware": True, "radio": True, "apps": True, "plan": True, "packs": True},
+    "laptop": {"documents": True, "readers": True, "tiers": [1, 2, 3], "maps": True, "firmware": True, "radio": True, "apps": True, "plan": True, "packs": True},
     # drives carry the family plan inside the encrypted document archive instead of as a plain file
-    "drive": {"documents": True, "readers": True, "tiers": [1, 2, 3], "maps": True, "firmware": False, "radio": True, "apps": False, "plan": False},
+    "drive": {"documents": True, "readers": True, "tiers": [1, 2, 3], "maps": True, "firmware": False, "radio": True, "apps": False, "plan": False, "packs": True},
 }
 
 # Reminder kinds per role: (label, every N days)
@@ -49,7 +50,16 @@ def profile_for(node):
         prof.update(json.loads(node.get("profile") or "{}"))
     except ValueError:
         pass
+    sel = prof.get("packs", True)
+    if not isinstance(sel, bool):
+        prof["packs"] = [s for s in sel if isinstance(s, str)][:100] if isinstance(sel, list) else True
     return prof
+
+
+def carries_pack(prof, row):
+    """Does this profile take this offline-pack file? (item ids are "<pack slug>:<item>")"""
+    sel = prof.get("packs", True)
+    return sel is True or (isinstance(sel, list) and row["item_id"].split(":", 1)[0] in sel)
 
 
 # storage
@@ -130,12 +140,17 @@ def plan(node, depot_rows, catalog_meta, budget):
     if prof.get("packages", True):   # OS packages for installing with no internet (small); see packages.py
         for r in (r for r in rows if r["kind"] == "package"):
             take(r)
-    libs = [r for r in rows if r["kind"] == "library" and
+    newest_lib = {}
+    for r in rows:
+        if r["kind"] == "library" and r["version"] > newest_lib.get(r["item_id"], ""):
+            newest_lib[r["item_id"]] = r["version"]
+    libs = [r for r in rows if r["kind"] == "library" and r["version"] == newest_lib.get(r["item_id"], "") and  # not a kept older one
             catalog_meta.get(r["item_id"], {}).get("tier", 9) in prof.get("tiers", [])]
     groups_done = set()
-    order = {"plan": 0, "web": 1, "map": 1, "firmware": 2, "radio": 2, "app": 3}
+    order = {"plan": 0, "web": 1, "map": 1, "firmware": 2, "radio": 2, "app": 3, "pack": 3}
     key = {"map": "maps", "web": "maps", "app": "apps"}
-    extras = [r for r in rows if r["kind"] in order and prof.get(key.get(r["kind"], r["kind"]))]
+    extras = [r for r in rows if r["kind"] in order and
+              (carries_pack(prof, r) if r["kind"] == "pack" else prof.get(key.get(r["kind"], r["kind"])))]
     tiered = sorted(libs, key=lambda r: (catalog_meta.get(r["item_id"], {}).get("tier", 9),
                                          catalog_meta.get(r["item_id"], {}).get("rank", 0)))
     # tier 1 libraries, then maps/radio/firmware, then the rest (general knowledge last)

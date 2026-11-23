@@ -29,6 +29,7 @@ OK, ERROR, SELF_INFO, MSG_SENT = 0x00, 0x01, 0x05, 0x06
 CONTACT_MSG, CHANNEL_MSG, NO_MORE_MSGS, BATTERY, DEVICE_INFO = 0x07, 0x08, 0x0A, 0x0C, 0x0D
 CONTACT_MSG_V3, CHANNEL_MSG_V3, CHANNEL_INFO = 0x10, 0x11, 0x12
 MESSAGES_WAITING = 0x83
+LOG_RX = 0x88       # a copy of every packet the radio hears: SNR, RSSI and the packet as it came off the air
 # the radio's contact list: every node whose advert it has heard (firmware MyMesh.cpp, ContactInfo.h)
 CONTACTS_START, CONTACT, END_OF_CONTACTS = 0x02, 0x03, 0x04
 PUSH_ADVERT, PUSH_PATH_UPDATED, PUSH_NEW_ADVERT, PUSH_CONTACT_DELETED = 0x80, 0x81, 0x8A, 0x8F
@@ -168,11 +169,53 @@ def parse(data):
             out["count" if t == CONTACTS_START else "lastmod"] = struct.unpack("<I", data[1:5])[0]
         elif t in (PUSH_ADVERT, PUSH_PATH_UPDATED, PUSH_CONTACT_DELETED) and len(data) >= 33:
             out["public_key"] = data[1:33].hex()
+        elif t == LOG_RX and len(data) >= 4:
+            out.update(snr=(data[1] if data[1] < 128 else data[1] - 256) / 4.0, rssi=data[2] if data[2] < 128 else data[2] - 256,
+                       raw=bytes(data[3:]))
         elif t == BATTERY and len(data) >= 3:
             out["battery_mv"] = struct.unpack("<H", data[1:3])[0]
     except (IndexError, struct.error):
         out["bad"] = True
     return out
+
+
+# ---------- packets as heard on the air (firmware src/Packet.cpp) ----------
+GRP_TXT = 0x05
+
+
+def hops(path_len):
+    """A message's path length byte -> how many repeaters it came through (None for a direct message, 0xFF).
+    Newer firmware keeps the size of each repeater's ID in the top two bits."""
+    if path_len is None or path_len == 0xFF:
+        return None
+    return path_len & 63
+
+
+def packet(raw):
+    """A raw packet -> {"route", "type", "hash_size", "path": [hex IDs of the repeaters, first one first], "payload"},
+    or None when it doesn't add up. Each repeater a flood message passes through adds the start of its public key."""
+    try:
+        header = raw[0]
+        i = 1
+        route = header & 0x03
+        if route in (0, 3):  # transport codes
+            i += 4
+        pl = raw[i]
+        i += 1
+        size, count = (pl >> 6) + 1, pl & 63
+        if size == 4 or i + size * count >= len(raw):
+            return None
+        path = [raw[i + k * size:i + (k + 1) * size].hex() for k in range(count)]
+        i += size * count
+        return {"route": route, "type": (header >> 2) & 0x0F, "hash_size": size, "path": path, "payload": bytes(raw[i:])}
+    except IndexError:
+        return None
+
+
+def channel_hash(secret):
+    """The byte a group message carries to say which channel it's on: the start of SHA-256 of the channel's key."""
+    import hashlib
+    return hashlib.sha256(bytes(secret)).digest()[0]
 
 
 # ---------- transports ----------

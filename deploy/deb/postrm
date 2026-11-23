@@ -1,0 +1,17 @@
+#!/bin/sh
+# BUNKR .deb: "remove" keeps the data in /var/lib/bunkr (database, store, backups) and the bunkr user.
+# Only "purge" deletes the data.
+set -e
+
+case "$1" in
+remove)
+	if [ -d /run/systemd/system ]; then systemctl daemon-reload || true; fi
+	;;
+purge)
+	if [ -d /run/systemd/system ]; then systemctl daemon-reload || true; fi
+	echo "bunkr: purge: deleting /var/lib/bunkr (database, store, backups) and /var/lib/bunkr-upgrade" >&2
+	rm -rf /var/lib/bunkr-upgrade /var/lib/bunkr
+	;;
+esac
+
+exit 0

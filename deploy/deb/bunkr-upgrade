@@ -1,0 +1,12 @@
+#!/usr/bin/python3 -IB
+"""Run by bunkr-upgrade.service (as root) when the web app leaves an upgrade request. See bunkr/upgrader.py.
+
+-I keeps the environment, the current folder and user site-packages out of it; the code comes only from the
+root-owned /usr/lib/bunkr. `bunkr-upgrade --status` prints the last result.
+"""
+import sys
+
+sys.path.insert(0, "/usr/lib/bunkr")
+from bunkr import upgrader  # noqa: E402
+
+sys.exit(upgrader.main(sys.argv[1:]))

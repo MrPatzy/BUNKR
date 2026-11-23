@@ -14,10 +14,10 @@ from pathlib import Path
 
 from . import library, manifest
 
-KINDS = ("library", "tool", "map", "firmware", "radio", "app", "documents", "web", "plan", "package")
+KINDS = ("library", "tool", "map", "firmware", "radio", "app", "documents", "web", "plan", "package", "pack")
 SUBDIR = {"library": "library", "tool": "tools", "map": "maps", "firmware": "firmware",
           "radio": "radio", "app": "apps", "documents": "documents", "web": "web", "plan": "plan",
-          "package": "packages"}
+          "package": "packages", "pack": "packs"}   # packs: offline packs the family chose (packs.py)
 
 
 def _now():
@@ -66,17 +66,23 @@ class Depot:
             p.unlink()
         self.store._exec("DELETE FROM depot_files WHERE id=?", (row["id"],))
 
+    def pinned(self, row):
+        """An admin chose to keep this version (Keep on Downloads): pruning leaves it alone."""
+        return f"{row['kind']}/{row['item_id']}/{row['version']}" in set(self.store.get_raw("store_pinned", []) or [])
+
     def prune_older(self, kind, item_id, keep_path):
-        """Drop older versions of an item once a newer one is verified."""
+        """Drop older versions of an item once a newer one is verified (not ones an admin kept)."""
         for row in self.store._rows("SELECT * FROM depot_files WHERE kind=? AND item_id=? AND path!=?",
                                     (kind, item_id, keep_path)):
-            self.remove(row)
+            if not self.pinned(row):
+                self.remove(row)
 
     def prune_versions(self, kind, item_id, keep_version):
-        """For items made of several files (firmware): drop every other version."""
+        """For items made of several files (firmware): drop every other version (not ones an admin kept)."""
         for row in self.store._rows("SELECT * FROM depot_files WHERE kind=? AND item_id=? AND version!=?",
                                     (kind, item_id, keep_version)):
-            self.remove(row)
+            if not self.pinned(row):
+                self.remove(row)
 
     def path(self, row):
         return self.root / row["path"]

@@ -206,6 +206,18 @@ class FlightHttpTests(unittest.TestCase):
         self.assertIn("flightaware.com/live/flight/UAL1234", f[0]["links"]["FlightAware"])
         self.assertNotIn("airport", self.req("POST", "/api/checkin", {"status": "moving", "lat": 38.8512, "lon": -77.0402})[1])
 
+    def test_check_someone_else_in_on_a_flight(self):
+        kid = [p for p in checkins.people(self.st) if p["name"] == "Kid"][0]["uid"]
+        dad = [p for p in checkins.people(self.st) if p["name"] == "Dad"][0]["uid"]
+        self.assertEqual(self.req("POST", "/api/checkin", {"person_uid": dad, "status": "safe"}, "kid")[0], 403)  # a child can't
+        code, r = self.req("POST", "/api/checkin", {"person_uid": kid, "status": "moving", "note": "boarding", "flight": "WN 88"})
+        self.assertEqual(code, 200)
+        self.assertTrue(r["flight"])
+        b = self.req("GET", "/api/board")[1]
+        me = [p for p in b["people"] if p["uid"] == kid][0]["last"]
+        self.assertEqual((me["status"], me["note"], me["by_name"]), ("moving", "boarding", "dad"))
+        self.assertEqual((b["flights"][0]["ident"], b["flights"][0]["person_name"]), ("WN88", "Kid"))
+
     def test_who_may_add_and_end(self):
         dad = [p for p in checkins.people(self.st) if p["name"] == "Dad"][0]["uid"]
         self.assertEqual(self.req("POST", "/api/flights", {"person_uid": dad, "number": "DL 5"}, "kid")[0], 403)

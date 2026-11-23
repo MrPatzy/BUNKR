@@ -202,6 +202,11 @@ ul.plain li { margin: 4px 0; }
 .checkin-card #checkin-help { margin-bottom: 6px; }
 .checkin-card .me-name { display: block; margin: 8px 0 0; }
 .checkin-extra input:not([type]) { width: 100%; }
+.board .checkin-for { grid-column: 1 / -1; display: grid; gap: 8px; padding: 8px 0 4px; }
+.board .checkin-for p { margin: 0; }
+.board .checkin-for .checkin-btns { margin: 0; }
+.board .checkin-for .checkin-btns button { font-size: 15px; padding: 12px 6px; }
+.board .checkin-for input { width: 100%; box-sizing: border-box; }
 .board { list-style: none; padding: 0; margin: 0; }
 .board li { display: grid; grid-template-columns: 1fr auto; gap: 2px 12px; padding: 10px 0; border-bottom: 1px solid var(--border); }
 .board li:last-child { border-bottom: 0; }

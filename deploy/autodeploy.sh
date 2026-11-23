@@ -91,8 +91,27 @@ if ! runuser -u bunkr -- python3 -I -c 'import sqlite3,sys; s=sqlite3.connect(sy
 	log "database backup failed; not deployed"
 	exit 1
 fi
-# keep the newest $KEEP_BACKUPS deploy backups
-python3 -I -c 'import pathlib,sys; fs=sorted(pathlib.Path(sys.argv[1]).glob("bunkr-before-deploy-*.db"), key=lambda p: p.stat().st_mtime); [f.unlink() for f in fs[:-int(sys.argv[2])]]' "$BACKUPS" "$KEEP_BACKUPS"
+# keep the newest deploy backups: as many as the admin set in BUNKR (Downloads > Space used; "retention" setting,
+# read-only from the live database), else $KEEP_BACKUPS. Never the one just made or the one the restore test uses;
+# other copies in the folder (nightly, made by hand) are BUNKR's business, not this script's.
+python3 -I - "$BACKUPS" "$DB" "$KEEP_BACKUPS" "$backup" <<'PY'
+import json, pathlib, re, sqlite3, sys
+folder, db, keep, just_made = pathlib.Path(sys.argv[1]), sys.argv[2], int(sys.argv[3]), pathlib.Path(sys.argv[4]).name
+protect = {just_made}
+try:
+    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5)
+    rows = dict(con.execute("SELECT key, value FROM settings WHERE key IN ('retention', 'restore_test')").fetchall())
+    con.close()
+    keep = min(200, max(1, int(json.loads(rows.get("retention") or "{}").get("deploy_keep", keep))))
+    protect.add(json.loads(rows.get("restore_test") or "{}").get("backup") or "")
+except Exception:
+    pass
+pat = re.compile(r"^bunkr-before-deploy-[0-9a-f]{7,40}-(\d{8})-(\d{4})\.db$")
+fs = sorted((f for f in folder.iterdir() if pat.match(f.name)), key=lambda f: "".join(pat.match(f.name).groups()), reverse=True)
+for f in fs[keep:]:
+    if f.name not in protect:
+        f.unlink()
+PY
 
 # 3. switch the live code and restart
 git merge --ff-only -q origin/main || { log "fast-forward failed"; exit 1; }
