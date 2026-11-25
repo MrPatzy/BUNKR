@@ -149,6 +149,15 @@ class HttpTests(unittest.TestCase):
     def state(self, user):
         return json.loads(self.req("GET", "/api/state", user=user)[2])
 
+    def test_my_account_callsigns(self):
+        """My account shows the linked person's callsigns, only their own."""
+        self.assertEqual(self.state("mom")["me_person"]["callsigns"], [])
+        pid = self.hub.store._rows("SELECT id FROM people WHERE name='Wife'")[0]["id"]
+        for n, call in enumerate(["W1AW", "", "W1AW", "KAB1234"]):
+            self.hub.store._exec("INSERT INTO licences(uid, person_id, kind, callsign) VALUES(?,?,?,?)", (f"lic{n}", pid, "ham", call))
+        self.assertEqual(self.state("mom")["me_person"]["callsigns"], ["W1AW", "KAB1234"])
+        self.assertNotIn("W1AW", json.dumps(self.state("dad")["me_person"] or {}))
+
     def test_household_and_views(self):
         s = self.state("dad")
         self.assertEqual((s["settings"]["adults"], s["settings"]["children"]), (2, 1))  # Grandma lives elsewhere

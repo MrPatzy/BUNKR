@@ -45,7 +45,6 @@
   - to everyone when it's in the configured country or state;
   - as "Near <person> (<town>)" when it names a town on the Sites tab where someone lives.
 - **Local watch:** each family town also gets its own news search.
-- **Unconfirmed:** public posts (Bluesky, and Reddit with an approved key) that name a family town, mention trouble and have a local clue go to a separate "Unconfirmed" view. Two different people posting the same thing raises a heads-up; posts the news later covers are marked.
 
 ## Mesh radio
 

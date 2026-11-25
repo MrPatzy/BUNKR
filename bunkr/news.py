@@ -725,6 +725,50 @@ def _watch_re(words):
     return re.compile(r"(?<![\w])(" + "|".join(re.escape(w) for w in words) + r")(?![\w])", re.I) if words else None
 
 
+TITLE_MAX = 60       # a notification's headline: about what a phone shows on one or two lines
+DETAIL_MAX = 220     # the explanation under it
+_DATELINE = re.compile(r"^\s*(?:[A-Z][A-Z .,'-]{2,40},?\s+(?:[A-Z][a-z]{2}\.?\s+\d{1,2}\s+)?(?:\([^)]{2,30}\)\s*)?(?:--|—|-|–)\s*)")
+
+
+def short_title(headline, limit=TITLE_MAX):
+    """A headline a phone can show whole: as it is when short, else cut at a word with an ellipsis."""
+    h = " ".join(str(headline or "").split())
+    if len(h) <= limit:
+        return h
+    cut = h[:limit - 1].rsplit(" ", 1)[0].rstrip(" ,;:-–—")
+    return cut + "…"
+
+
+def detail(items, headline, limit=DETAIL_MAX):
+    """What the story says, from the outlets' own descriptions: the first sentence or two, no dateline, not just the
+    headline again. Falls back to the full headline."""
+    hw = _words(headline)
+    # the source whose own title is closest to the story's headline speaks for it (a stray source doesn't)
+    ranked = sorted(items, key=lambda it: -len(_words(it.get("title") or "") & hw))
+    for it in ranked:
+        if len(_words(it.get("title") or "") & hw) < max(2, round(len(hw) * 0.4)):
+            break   # not close enough to the headline to speak for the story
+        t = " ".join(re.sub(r"<[^>]+>", " ", it.get("summary") or "").split())
+        own = " ".join((it.get("title") or "").split())
+        if not t or t.startswith("Reported by ") or t.rstrip(".…") in headline or (own and t.startswith(own[:40])):
+            continue   # empty, or just the headline again (news searches repeat it, with the outlet's name)
+        t = re.sub(r"^\[[^\]]{2,40}\]\s*", "", t)                                   # "[Liberian Observer] "
+        t = re.split(r"\s+(?:Sign up for|Leer más|Read more|Continue reading|The post .* appeared first)", t)[0]
+        t = _DATELINE.sub("", t).rstrip(".… ")
+        if len(t) < 30:
+            continue
+        sentences = re.split(r"(?<=[.!?])\s+", t)
+        out = ""
+        for s_ in sentences:
+            if len(out) + len(s_) + 1 > limit:
+                break
+            out = f"{out} {s_}".strip()
+        if not out:
+            out = t[:limit - 1].rsplit(" ", 1)[0] + "…"
+        return out if out.endswith((".", "!", "?", "…")) else out + "."
+    return headline
+
+
 def early_warning(store, ids, when=None, places=()):
     """Raise new US/Colorado alarm stories to everyone and watched words to whoever watches them, once each.
     An alarm story that names a family town (places: localwatch.places) is raised as "Near Jordan (Evergreen)"."""
@@ -750,22 +794,23 @@ def early_warning(store, ids, when=None, places=()):
         first = brief.OUTLET.get(items[0]["outlet"], {}).get("name", items[0]["outlet"]) if items else ""
         if items and items[0]["outlet"] == "local" and items[0]["summary"].startswith("Reported by "):
             first = items[0]["summary"].removeprefix("Reported by ").rstrip(".")  # the station, not "Local news search"
-        body = f"First from {first}" + (f", now {s['outlets']} outlets" if s["outlets"] > 1 else "") + ". Developing: details may change."
+        source = f"First from {first}" + (f", now {s['outlets']} outlets" if s["outlets"] > 1 else "") + ". Developing: details may change."
+        body = detail(items, s["headline"]) + "\n" + source
         alarm = ALARM_RE.search(s["headline"])
         near = next((p for p in places if alarm and re.search(r"(?<![\w])" + re.escape(p["name"]) + r"(?![\w])", text, re.I)), None)
         if near and _once(store, f"news:alarm:{s['id']}"):
             store._exec("UPDATE news_stories SET alarm=? WHERE id=?", (alarm.group(0).lower(), s["id"]))
-            _emit("news", {"title": f"Near {near['label']}: {s['headline']}"[:200], "body": body, "tag": "news-" + s["id"], "url": "/#brief",
+            _emit("news", {"title": short_title(f"Near {near['label']}: {s['headline']}", TITLE_MAX + 25), "body": body, "tag": "news-" + s["id"], "url": "/#story-" + s["id"],
                            "user_ids": None, "family": True})
         elif alarm and s["first_at"] >= early and s["area"] in ("us", "colorado") and raised < EARLY_MAX and _once(store, f"news:alarm:{s['id']}"):
             store._exec("UPDATE news_stories SET alarm=? WHERE id=?", (alarm.group(0).lower(), s["id"]))
-            _emit("news", {"title": s["headline"][:200], "body": body, "tag": "news-" + s["id"], "url": "/#brief", "user_ids": None})
+            _emit("news", {"title": short_title(s["headline"]), "body": body, "tag": "news-" + s["id"], "url": "/#story-" + s["id"], "user_ids": None})
             raised += 1
         for uid, rx in watchers:
             m = rx.search(text)
             if m and _once(store, f"news:watch:{uid}:{s['id']}"):
-                _emit("news", {"title": s["headline"][:200], "body": f"You're watching \"{m.group(0)}\". " + body,
-                               "tag": "news-" + s["id"], "url": "/#brief", "user_ids": [uid]})
+                _emit("news", {"title": short_title(s["headline"]), "body": f"You're watching \"{m.group(0)}\". " + body,
+                               "tag": "news-" + s["id"], "url": "/#story-" + s["id"], "user_ids": [uid]})
     return raised
 
 
@@ -854,8 +899,14 @@ def review(store, flag_id, decision, user):
     if not rows:
         raise KeyError(flag_id)
     f = rows[0]
-    if decision not in ("confirm", "dismiss", "undo"):
-        raise ValueError("decision is confirm, dismiss or undo")
+    if decision not in ("confirm", "dismiss", "undo", "clear"):
+        raise ValueError("decision is confirm, dismiss, undo or clear")
+    if decision == "clear":  # seen it, keep what it taught: it just stops being listed
+        if f["status"] == "open":
+            raise ValueError("review it first")
+        cleared = [i for i in (store.get_raw("news_flags_cleared", []) or []) if i != flag_id]
+        store.set_raw("news_flags_cleared", ([flag_id] + cleared)[:500])
+        return flags(store)
     if decision == "undo":  # a confirmed flag was wrong after all: forget what it taught and put the source back
         if f["status"] != "confirmed":
             raise ValueError("only a confirmed flag can be undone")
@@ -923,8 +974,10 @@ def flags(store, limit=30):
         r["words"] = json.loads(r["words"] or "[]")
         r.pop("user_id", None)
     taught = {fid: (sorted(a), sorted(b)) for a, b, fid in apart_pairs(store)}
+    cleared = set(store.get_raw("news_flags_cleared", []) or [])
     for r in rows:
         r["apart"] = taught.get(r["id"])
+        r["cleared"] = r["id"] in cleared
     return {"flags": rows, "open": sum(1 for r in rows if r["status"] == "open"),
             "confirmed": store._rows("SELECT COUNT(*) AS n FROM news_flags WHERE status='confirmed'")[0]["n"],
             "weak_words": sorted(weak_words(store), key=lambda w: -weak_words(store)[w])[:30]}
@@ -932,7 +985,96 @@ def flags(store, limit=30):
 
 # ---------- each person's choices ----------
 def default_prefs():
-    return {"areas": [a for a, _ in AREAS], "muted_topics": [], "watch": []}
+    return {"areas": [a for a, _ in AREAS], "muted_topics": [], "muted_outlets": [], "watch": []}
+
+
+# ---------- which outlets: an admin turns one off for everyone (not fetched), each person can hide more ----------
+def outlets_off(store):
+    return {k for k in (store.get_raw("news_outlets_off", []) or []) if k in brief.OUTLET}
+
+
+def set_outlets_off(store, keys):
+    keys = sorted({k for k in (keys or []) if k in brief.OUTLET})
+    store.set_raw("news_outlets_off", keys)
+    return keys
+
+
+QUIET_DAYS = 3   # a feed with no new headlines for this long is flagged on the admin's list
+
+
+def record_feed_status(store, status, when=None):
+    """Each fetch's result per outlet, keeping when it last worked and last brought headlines."""
+    t = _iso(when or now())
+    old = store.get_raw("news_feed_status", {}) or {}
+    for k, s in status.items():
+        o = dict(old.get(k) or {})
+        o.update(ok=bool(s.get("ok")), at=t, error="" if s.get("ok") else str(s.get("error") or "")[:160])
+        if s.get("ok"):
+            o["last_ok"] = t
+            if s.get("count"):
+                o["last_items"] = t
+        o.setdefault("since", t)   # when BUNKR first tried it
+        old[k] = o
+    store.set_raw("news_feed_status", {k: v for k, v in old.items() if k in brief.OUTLET})
+
+
+def feed_health(st, when=None):
+    """'' when fine; else a few plain words for the admin: it's failing, or nothing new for days."""
+    if not st:
+        return ""
+    when = when or now()
+    def days(k):
+        try:
+            return (when - datetime.fromisoformat(st[k])).total_seconds() / 86400
+        except (KeyError, TypeError, ValueError):
+            return None
+    quiet = days("last_items") if st.get("last_items") else days("since")
+    down = days("last_ok") if st.get("last_ok") else days("since")   # since it last worked, or since first tried
+    if not st.get("ok") and down is not None and down >= 1:
+        return f"not answering for {round(down)} day{'' if round(down) == 1 else 's'}"
+    if quiet is not None and quiet >= QUIET_DAYS:
+        return f"nothing new for {round(quiet)} days"
+    return ""
+
+
+def sources(store, user_id):
+    """Every outlet BUNKR can read, grouped by region, with whether it's fetched, whether this person hides it, and
+    (for an admin's eyes) whether its feed still works."""
+    off, muted = outlets_off(store), set(prefs(store, user_id)["muted_outlets"])
+    st = store.get_raw("news_feed_status", {}) or {}
+    return [{k: v for k, v in o.items() if k != "feed"} | {"fetched": k not in off, "hidden": k in muted,
+                                                            "health": feed_health(st.get(k)) if k not in off else ""}
+            for k, o in brief.OUTLET.items() if o["feed"]]
+
+
+def _hidden(store, p):
+    return outlets_off(store) | set(p["muted_outlets"])
+
+
+def _outlets_by_story(store, ids):
+    by = {}
+    for i in range(0, len(ids), 500):
+        chunk = ids[i:i + 500]
+        for r in store._rows(f"SELECT story, outlet FROM news_items WHERE story IN ({','.join('?' * len(chunk))})", tuple(chunk)):
+            by.setdefault(r["story"], set()).add(r["outlet"])
+    return by
+
+
+def _drop_hidden(store, stories, hidden):
+    """Stories only from hidden outlets go; the rest count only the outlets (and regions) still shown."""
+    if not hidden:
+        return stories
+    by = _outlets_by_story(store, [s["id"] for s in stories])
+    out = []
+    for s in stories:
+        have = by.get(s["id"], set())
+        left = have - hidden
+        if have and not left:
+            continue
+        if have != left:
+            s = dict(s, outlets=len(left), regions=json.dumps(sorted({brief.OUTLET[o]["region"] for o in left if o in brief.OUTLET})))
+        out.append(s)
+    return out
 
 
 def clean_prefs(p):
@@ -944,6 +1086,7 @@ def clean_prefs(p):
     watch = [" ".join(str(w).split())[:40] for w in watch if isinstance(w, (str, int))]
     return {"areas": list(dict.fromkeys(areas)) if isinstance(p.get("areas"), list) else default_prefs()["areas"],
             "muted_topics": list(dict.fromkeys(t for t in (p.get("muted_topics") or []) if t in TOPIC_NAMES)),
+            "muted_outlets": list(dict.fromkeys(o for o in (p.get("muted_outlets") or []) if o in brief.OUTLET)),
             "watch": list(dict.fromkeys(w for w in watch if len(w) >= 3))[:WATCH_MAX]}
 
 
@@ -1021,7 +1164,8 @@ def feed(store, user_id, area=None, topic=None, unread=False, limit=40, offset=0
     """One person's stories, best first, with their filters and what they've read and rated."""
     p, w, when = prefs(store, user_id), learned(store, user_id), now()
     out, counts = [], {}
-    for s in _stories(store, user_id):
+    hidden = _hidden(store, p)
+    for s in _drop_hidden(store, _stories(store, user_id), hidden):
         if s["rating"] < 0 or s["topic"] in p["muted_topics"]:
             continue
         if area is None and s["area"] not in p["areas"]:
@@ -1034,7 +1178,7 @@ def feed(store, user_id, area=None, topic=None, unread=False, limit=40, offset=0
     out.sort(key=lambda s: -_score(s, w, when))
     page = [_public(s) for s in out[offset:offset + limit]]
     if with_items and page:
-        _attach_items(store, page)
+        _attach_items(store, page, hidden)
     return {"stories": page, "total": len(out), "unread_by_area": counts, "prefs": p, "updated_at": store.get_raw("news_refreshed", "")}
 
 
@@ -1044,11 +1188,13 @@ def _public(s):
             "last_at": s["last_at"], "read": bool(s["read_at"]), "rating": s["rating"], "alarm": s.get("alarm") or ""}
 
 
-def _attach_items(store, stories):
+def _attach_items(store, stories, hidden=frozenset()):
     ids = [s["id"] for s in stories]
     by = {}
     for r in store._rows(f"SELECT story, outlet, title, url, at FROM news_items WHERE story IN ({','.join('?' * len(ids))}) ORDER BY at DESC",
                          tuple(ids)):
+        if r["outlet"] in hidden:
+            continue
         if len(by.setdefault(r["story"], [])) < 10:
             by[r["story"]].append({k: r[k] for k in ("outlet", "title", "url", "at")})
     for s in stories:
@@ -1059,7 +1205,7 @@ def map_points(store, user_id, unread_only=True):
     """Stories with a place, grouped by place, for the map: how many, how many unread, and their ids."""
     p = prefs(store, user_id)
     pts = {}
-    for s in _stories(store, user_id):
+    for s in _drop_hidden(store, _stories(store, user_id), _hidden(store, p)):
         if s["lat"] is None or s["rating"] < 0 or s["topic"] in p["muted_topics"] or s["area"] not in p["areas"]:
             continue
         if unread_only and s["read_at"]:
@@ -1080,6 +1226,7 @@ def stories_by_id(store, user_id, ids):
                        f"LEFT JOIN news_marks m ON m.story = s.id AND m.user_id = ? WHERE s.id IN ({','.join('?' * len(ids))})",
                        (_uid(user_id), *ids))
     w, when = learned(store, user_id), now()
-    page = [_public(s) for s in sorted(rows, key=lambda s: -_score(s, w, when))]
-    _attach_items(store, page)
+    hidden = _hidden(store, prefs(store, user_id))
+    page = [_public(s) for s in sorted(_drop_hidden(store, rows, hidden), key=lambda s: -_score(s, w, when))]
+    _attach_items(store, page, hidden)
     return page

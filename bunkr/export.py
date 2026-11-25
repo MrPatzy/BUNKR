@@ -112,6 +112,37 @@ def shopping_html(rows):
 </body></html>"""
 
 
+def labels_html(locations, items, base):
+    """A sheet of bin labels: each a QR code (the link opens that place in BUNKR), its name and what's in it now.
+    The same link can go on an NFC sticker. `base` is BUNKR's address as phones reach it."""
+    from . import qr
+    e = html.escape
+    today = datetime.now().date().isoformat()
+    cards = []
+    for l in locations:
+        here = [i for i in items if i["location_id"] == l["id"] or (i.get("location") or "").startswith(l["name"] + " > ")]
+        soon = sorted(i["expires"] for i in here if i.get("expires") and i["expires"] >= today)
+        link = f"{base.rstrip('/')}/#bin-{l['uid']}"
+        cards.append(f"""<div class=label><div class=qr>{qr.svg(link, module=3)}</div><div class=txt>
+<div class=name>{e(l['name'].split(' > ')[-1])}</div>{f"<div class=path>{e(' > '.join(l['name'].split(' > ')[:-1]))}</div>" if ' > ' in l['name'] else ''}
+<div class=what>{len(here)} item{'' if len(here) == 1 else 's'}{f' · next expiry {e(soon[0])}' if soon else ''}</div>
+<div class=how>Scan or tap for what's inside now</div></div></div>""")
+    return f"""<!doctype html><html><head><meta charset="utf-8"><title>Bin labels</title>
+<style>{PRINT_CSS}
+.sheet {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(3.4in, 1fr)); gap: .15in; }}
+.label {{ display: flex; gap: .12in; align-items: center; border: 1px dashed #999; border-radius: 6px; padding: .1in; break-inside: avoid; }}
+.label .qr svg {{ width: 1.25in; height: 1.25in; display: block; }}
+.label .name {{ font-size: 18pt; font-weight: 700; line-height: 1.1; }}
+.label .path {{ font-size: 10pt; color: #444; }}
+.label .what {{ font-size: 10pt; margin-top: .05in; }}
+.label .how {{ font-size: 8pt; color: #666; margin-top: .04in; }}
+@media print {{ .meta {{ display: none; }} }}
+</style></head><body><h1>Bin labels</h1>
+<p class="meta">Print, cut along the dashed lines and stick one on each bin. The item count is as of today; scanning shows what's
+there now. For an NFC sticker, write the same link (Android: "NFC tag" on Locations; on an iPhone, an app like NFC Tools).</p>
+<div class=sheet>{''.join(cards) or '<p>No locations yet.</p>'}</div></body></html>"""
+
+
 def packing_html(location, items, score, categories):
     """Packing list for one location: what's in it, and (for kits) what's still missing."""
     e = html.escape

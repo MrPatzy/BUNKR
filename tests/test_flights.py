@@ -80,6 +80,78 @@ class FlightTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             flights.parse_number("hello there")
 
+    def test_airline_names_and_codes_resolve_the_same(self):
+        want = {"ident": "WN2496", "callsign": "SWA2496", "airline": "Southwest"}
+        for typed in ("Southwest 2496", "southwest 2496", "Southwest Airlines 2496", "WN 2496", "wn2496", "SWA2496"):
+            self.assertEqual(flights.parse_number(typed), want, typed)
+        self.assertEqual(flights.parse_number("Frontier 1234")["ident"], "F91234")
+        self.assertEqual(flights.parse_number("united 512 to LAX"), {"ident": "UA512", "callsign": "UAL512", "airline": "United", "dest": "LAX"})
+
+    def test_wrong_codes_ask(self):
+        with self.assertRaises(flights.Unsure) as cm:
+            flights.parse_number("SW 2496")
+        self.assertEqual(str(cm.exception), "Did you mean Southwest (WN) 2496?")
+        self.assertEqual([o["callsign"] for o in cm.exception.options], ["SWA2496"])
+        with self.assertRaises(flights.Unsure) as cm:  # a real code, but often typed for Frontier
+            flights.parse_number("FR 1234")
+        self.assertEqual([o["airline"] for o in cm.exception.options], ["Ryanair", "Frontier"])
+        with self.assertRaises(flights.Unsure) as cm:  # half a name is a guess
+            flights.parse_number("south 12")
+        self.assertIn("Southwest", [o["airline"] for o in cm.exception.options])
+
+    def test_no_match_says_so_and_suggests(self):
+        with self.assertRaises(flights.Unsure) as cm:
+            flights.parse_number("ZZ 99")
+        self.assertEqual(str(cm.exception), "Couldn't find ZZ 99. Type it like United 1234 or UA 1234.")
+        self.assertEqual(cm.exception.options, [])
+        with self.assertRaises(flights.Unsure) as cm:
+            flights.parse_number("Zorblax 5")
+        self.assertTrue(str(cm.exception).startswith("Couldn't find ZORBLAX 5"))
+        self.assertEqual(flights.parse_number("SY 7")["airline"], "Sun Country")  # a real code is fine
+
+    def test_ask_only_when_unsure(self):
+        self.assertIsNone(flights.ask(self.st, "WN 2496"))  # clear, no key: track now
+        q = flights.ask(self.st, "SW 2496")
+        self.assertEqual(q["message"], "Did you mean Southwest (WN) 2496?")
+        self.assertEqual((q["options"][0]["number"], q["options"][0]["callsign"]), ("WN2496", "SWA2496"))
+        self.assertEqual(flights.ask(self.st, "Zorblax 5")["options"], [])
+        # a clear entry whose FlightAware lookup agrees tracks with no prompt
+        self.sky.flight(ident="SWA2496", atc_ident="SWA2496")
+        self.assertIsNone(flights.ask(self.st, "WN 2496", "k" * 32, self.sky, T0))
+        # FlightAware naming a different flight is asked about first, with where it goes and when
+        self.sky.flight(ident="SWN2496", atc_ident="SWN2496")
+        q = flights.ask(self.st, "WN 2496", "k" * 32, self.sky, T0)
+        self.assertIn("different flight", q["message"])
+        self.assertEqual(q["options"][0]["callsign"], "SWN2496")
+        self.assertIn("Washington to Denver", q["options"][0]["label"])
+        self.assertIn("5:40 PM", q["options"][0]["label"])  # 22:40 UTC in New York
+        self.assertEqual(flights.lookups_this_month(self.st, T0), 2)
+
+    def test_flightaware_never_swaps_the_callsign_silently(self):
+        flights.add(self.st, self.alex, "WN 2496", origin="DCA")
+        self.sky.flight(ident="SWN2496", atc_ident="SWN2496")
+        f = self.check(0)
+        self.assertEqual(f["callsign"], "SWA2496")
+        self.assertEqual(flights.view(f)["callsign"], "SWA2496")
+        self.assertFalse(any(u.endswith("SWN2496") for u in self.sky.calls if u.startswith(flights.ADSB)))
+        # picked by the person: that callsign is tracked, and the links use it
+        flights.add(self.st, self.alex, "WN 2496", callsign="swn2496")
+        v = flights.view(flights.active(self.st)[0])
+        self.assertEqual(v["callsign"], "SWN2496")
+        self.assertIn("flightradar24.com/data/flights/swn2496", v["links"]["Flightradar24"])
+        with self.assertRaises(ValueError):
+            flights.add(self.st, self.alex, "WN 2496", callsign="no way!")
+
+    def test_assumed_destination_is_a_guess_until_flightaware_knows(self):
+        flights.add(self.st, self.alex, "UA 1234", origin="DCA", home=flights.airport("DEN"))
+        self.assertTrue(flights.view(flights.active(self.st)[0])["dest_guess"])
+        self.sky.flight(destination={"code_iata": "PHX", "name": "Phoenix", "timezone": "America/Phoenix"})
+        f = self.check(0)
+        self.assertEqual(f["dest"], "PHX")
+        self.assertFalse(flights.view(f)["dest_guess"])
+        flights.add(self.st, self.alex, "UA 1234", dest="LAX", home=flights.airport("DEN"))
+        self.assertFalse(flights.view(flights.active(self.st)[0])["dest_guess"])
+
     def check(self, minutes, key="k" * 32):
         f = flights.active(self.st)[0]
         return flights.check(self.st, f, key=key, get=self.sky, when=T0 + timedelta(minutes=minutes))
@@ -125,13 +197,97 @@ class FlightTests(unittest.TestCase):
         f = self.check(0, key=None)
         self.assertFalse(any(u.startswith(flights.AEROAPI) for u in self.sky.calls))
         self.assertEqual(f["status"], "airborne")
-        self.assertIn("Ground Delay (45 minutes) - weather", flights.view(f)["faa"]["DEN"]["text"])
+        self.assertEqual(flights.view(f)["faa"]["DEN"]["lines"], ["DEN: arrivals delayed about 45 min (weather)"])
+        self.assertIn("Ground Delay (45 minutes) - weather", flights.view(f)["faa"]["DEN"]["raw"])
         # gone quiet low down near Denver after being in the air: landed
         self.sky.plane = {"lat": 39.95, "lon": -104.8, "alt_baro": 3000, "gs": 150, "seen_pos": 0}
         self.check(200, key=None)
         self.sky.plane = None
         f = self.check(230, key=None)
         self.assertEqual(f["status"], "landed")
+
+    def test_faa_filters_private_plane_notices_and_speaks_plainly(self):
+        notam = {"Type": "Closure", "Reason": "!LAX 09/123 LAX AD AP CLSD TO NON SKED TRANSIENT GA ACFT EXC PPR"}
+        self.assertEqual(flights.faa_line("LAX", notam), "")
+        stop = {"Type": "Ground Stop", "Reason": "thunderstorms", "EndTime": "3:30 PM"}
+        self.assertEqual(flights.faa_line("LAX", stop), "LAX: ground stop until 3:30 PM (thunderstorms)")
+        self.assertEqual(flights.expand("AD CLSD EXC PPR"), "airport closed except prior permission required")
+        out = flights.faa("LAX", lambda url, **k: {"Delay": True, "Status": [notam]})
+        self.assertEqual(out, {})
+        out = flights.faa("LAX", lambda url, **k: {"Delay": True, "Status": [notam, stop]})
+        self.assertEqual(len(out["lines"]), 1)
+        self.assertIn("NON SKED", out["raw"])
+
+    def test_late_notification_has_landing_time(self):
+        flights.HOME_TZ = "America/Denver"
+        self.addCleanup(setattr, flights, "HOME_TZ", "")
+        bodies = []
+        flights.listeners.append(lambda ev, d: bodies.append(d["body"]))
+        flights.add(self.st, self.alex, "UA 1234", origin="DCA")
+        self.sky.flight(estimated_in=iso(T0 + timedelta(hours=5, minutes=42)))  # 22:00Z + 5:42 = 03:42Z = 8:42 PM MST
+        self.check(0)
+        self.assertEqual(bodies, ["About 72 min late into Denver. Now landing 8:42 PM MST."])
+        flights.HOME_TZ = "America/New_York"
+        self.assertEqual(flights.local_time(T0, "America/Denver", "America/New_York"), "3:00 PM MST")
+
+    def test_times_are_labeled_in_the_viewers_zone(self):
+        t = datetime(2026, 11, 20, 23, 3, tzinfo=timezone.utc)
+        lt = flights.labeled_time
+        self.assertEqual(lt(t, "America/Denver", "America/Los_Angeles", "LAX"), "4:03 PM MST (3:03 PM PST at LAX)")
+        self.assertEqual(lt(t, "America/Denver", "America/Denver", "DEN"), "4:03 PM MST")
+        self.assertEqual(lt(t, "America/New_York", "America/Denver", "DEN"), "6:03 PM EST (4:03 PM MST at DEN)")
+        self.assertEqual(lt(t, "", "America/Denver", "DEN"), "4:03 PM MST")
+
+    def test_late_notification_shows_both_zones(self):
+        flights.HOME_TZ = "America/New_York"
+        self.addCleanup(setattr, flights, "HOME_TZ", "")
+        bodies = []
+        flights.listeners.append(lambda ev, d: bodies.append(d["body"]))
+        flights.add(self.st, self.alex, "UA 1234", origin="DCA")
+        self.sky.flight(estimated_in=iso(T0 + timedelta(hours=5, minutes=42)))
+        self.check(0)
+        self.assertEqual(bodies, ["About 72 min late into Denver. Now landing 10:42 PM EST (8:42 PM MST at DEN)."])
+
+    def test_inbound_plane_before_departure(self):
+        flights.add(self.st, self.alex, "UA 1234", origin="DCA")
+        self.sky.flight()
+        # the callsign is silent; the tail number is flying in to DCA on another flight, ~100 km out at 400 kt
+        self.sky.plane = {"lat": 39.5, "lon": -77.0, "alt_baro": 9000, "gs": 400, "seen_pos": 2}
+        real = self.sky
+        def get(url, headers=None, timeout=15):
+            if url.startswith(flights.ADSB):
+                ac = [self.sky.plane] if url.endswith("N12345") else []
+                return {"ac": ac}
+            return real(url, headers, timeout)
+        f = flights.active(self.st)[0]
+        f = flights.check(self.st, f, key="k" * 32, get=get, when=T0)
+        v = flights.view(f, T0)
+        self.assertEqual(f["status"], "scheduled")
+        self.assertIsNone(v["pos"])
+        self.assertTrue(v["inbound"]["eta_min"] and not v["inbound"]["at_origin"])
+        # parked at the origin: "at DCA", still scheduled
+        self.sky.plane = {"lat": 38.85, "lon": -77.04, "alt_baro": "ground", "gs": 0, "seen_pos": 1}
+        f = flights.check(self.st, f, key="k" * 32, get=get, when=T0 + timedelta(minutes=1))
+        self.assertEqual(f["status"], "scheduled")
+        self.assertTrue(flights.view(f, T0 + timedelta(minutes=1))["inbound"]["at_origin"])
+        # moving at the origin near departure: it's hers
+        self.sky.plane = {"lat": 38.85, "lon": -77.04, "alt_baro": "ground", "gs": 15, "seen_pos": 1}
+        f = flights.check(self.st, f, key="k" * 32, get=get, when=T0 + timedelta(minutes=30))
+        self.assertEqual(f["status"], "taxiing")
+        self.assertIsNone(flights.view(f, T0 + timedelta(minutes=30))["inbound"])
+
+    def test_registration_match_counts_after_departure(self):
+        flights.add(self.st, self.alex, "UA 1234", origin="DCA")
+        self.sky.flight(actual_out=iso(T0 - timedelta(minutes=20)), actual_off=iso(T0 - timedelta(minutes=10)))
+        plane = {"lat": 39.5, "lon": -95.0, "alt_baro": 30000, "gs": 450, "seen_pos": 2}
+        real = self.sky
+        def get(url, headers=None, timeout=15):
+            if url.startswith(flights.ADSB):
+                return {"ac": [plane] if url.endswith("N12345") else []}
+            return real(url, headers, timeout)
+        f = flights.check(self.st, flights.active(self.st)[0], key="k" * 32, get=get, when=T0)
+        self.assertEqual(f["status"], "airborne")
+        self.assertEqual(flights.view(f, T0)["pos"]["alt_ft"], 30000)
 
     def test_monthly_cap(self):
         flights.add(self.st, self.alex, "UA1234")
@@ -205,6 +361,26 @@ class FlightHttpTests(unittest.TestCase):
         self.assertEqual((f[0]["ident"], f[0]["origin"], f[0]["dest"], f[0]["person_name"]), ("UA1234", "DCA", "DEN", "Dad"))
         self.assertIn("flightaware.com/live/flight/UAL1234", f[0]["links"]["FlightAware"])
         self.assertNotIn("airport", self.req("POST", "/api/checkin", {"status": "moving", "lat": 38.8512, "lon": -77.0402})[1])
+
+    def test_unsure_flights_ask_first_and_track_nothing(self):
+        code, r = self.req("POST", "/api/checkin", {"status": "moving", "flight": "SW 2496"})
+        self.assertEqual(code, 200)
+        self.assertEqual(r["confirm"]["message"], "Did you mean Southwest (WN) 2496?")
+        self.assertNotIn("uid", r)  # not even checked in yet
+        self.assertEqual(self.req("GET", "/api/flights")[1]["flights"], [])
+        code, r = self.req("POST", "/api/flights", {"number": "FR 1234"})
+        self.assertEqual([o["airline"] for o in [{"airline": o["label"].split(" (")[0]} for o in r["confirm"]["options"]]], ["Ryanair", "Frontier"])
+        self.assertEqual(self.req("GET", "/api/flights")[1]["flights"], [])
+        code, r = self.req("POST", "/api/flights", {"number": "Zorblax 5"})
+        self.assertEqual((code, r["confirm"]["options"]), (200, []))
+        # picking one tracks it
+        code, r = self.req("POST", "/api/checkin", {"status": "moving", "flight": "WN2496", "callsign": "SWA2496"})
+        self.assertTrue(r["flight"])
+        f = self.req("GET", "/api/board")[1]["flights"][0]
+        self.assertEqual((f["ident"], f["callsign"], f["airline"]), ("WN2496", "SWA2496", "Southwest"))
+        self.assertEqual(self.req("POST", "/api/flights", {"number": "Southwest 2496"})[1]["ident"], "WN2496")
+        names = [a["name"] for a in self.req("GET", "/api/flights/airlines")[1]["airlines"]]
+        self.assertIn("Southwest", names)
 
     def test_check_someone_else_in_on_a_flight(self):
         kid = [p for p in checkins.people(self.st) if p["name"] == "Kid"][0]["uid"]

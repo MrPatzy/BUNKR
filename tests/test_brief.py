@@ -118,7 +118,7 @@ class BriefTests(unittest.TestCase):
         server.store = self.store
         real = brief.build
         made, heard = [], []
-        brief.build = lambda store, items, use_ai=True, ai=None: made.append(1) or {"id": "x", "created_at": brief.now(), "near": [],
+        brief.build = lambda store, items, use_ai=True, ai=None, **kw: made.append(1) or {"id": "x", "created_at": brief.now(), "near": [],
                                                                                      "groups": [{"headline": "H"}], "ai": None}
         situation.listeners[:] = []
         try:

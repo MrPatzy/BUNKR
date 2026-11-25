@@ -12,6 +12,7 @@ import json
 TILES = [
     ("board", "Family", "all"),
     ("alerts", "Alerts near us", "all"),
+    ("weather", "Weather at home", "all"),
     ("news", "Today's news", "all"),
     ("med", "Medicines", "all"),
     ("lookup", "Look it up", "all"),

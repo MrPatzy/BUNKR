@@ -52,11 +52,6 @@ def gn(*titles):
     return f'<?xml version="1.0"?><rss version="2.0"><channel><title>x</title>{items}</channel></rss>'.encode()
 
 
-def bsky_post(handle, text, minutes=10, rkey="abc"):
-    return {"uri": f"at://did:plc:x/app.bsky.feed.post/{rkey}", "author": {"handle": handle},
-            "record": {"text": text, "createdAt": (NOW - timedelta(minutes=minutes)).isoformat().replace("+00:00", "Z")}}
-
-
 class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -71,11 +66,9 @@ class Base(unittest.TestCase):
         self.heard = []
         hear = lambda ev, d: self.heard.append((ev, d))  # noqa: E731
         news.listeners[:] = [hear]
-        localwatch.listeners[:] = [hear]
 
     def tearDown(self):
         news.listeners.clear()
-        localwatch.listeners.clear()
         self.tmp.cleanup()
 
 
@@ -88,7 +81,7 @@ class PlaceTests(Base):
         self.assertEqual(localwatch.city_of("Denver"), ("", ""))
 
     def test_places_from_sites_and_people(self):
-        localwatch.save_settings(self.st, self.dir, {"extra_places": "Conifer, CO\n\nConifer, CO"})
+        localwatch.save_settings(self.st, {"extra_places": "Conifer, CO\n\nConifer, CO"})
         got = {p["name"]: p["label"] for p in localwatch.places(self.st)}
         self.assertEqual(got, {"Longmont": "home (Longmont)", "Nederland": "Jordan (Nederland)", "Conifer": "Conifer"})
 
@@ -128,65 +121,11 @@ class LocalNewsTests(Base):
         self.assertEqual(len(notify._plan(self.st, "news", d, at=night, inbox=True)), 1)
 
 
-class ChatterTests(Base):
-    def run_with(self, posts, reddit=None):
-        routes = {"searchPosts": {"posts": posts}}
-        if reddit is not None:
-            routes |= {"access_token": {"access_token": "tok", "expires_in": 3600}, "oauth.reddit.com": reddit}
-        web = FakeWeb(routes)
-        return localwatch.run(self.st, self.dir, opener=web), web
-
-    def test_bluesky_filters_and_two_people_raise_once(self):
-        r, web = self.run_with([bsky_post("amy.bsky.social", "Boil water notice in Nederland right now, main broke on 74", rkey="1"),
-                                bsky_post("bob.bsky.social", "Love the evergreen trees today", rkey="2"),
-                                bsky_post("cat.bsky.social", "Huge outage downtown", rkey="3")])
-        self.assertEqual(r["new"], 1)
-        self.assertEqual(r["raised"], 0)                    # one person isn't enough
-        rows = localwatch.recent(self.st)
-        self.assertEqual((rows[0]["place"], rows[0]["alarm"], rows[0]["url"]),
-                         ("Nederland", "a water problem (boil or don't drink)", "https://bsky.app/profile/amy.bsky.social/post/1"))
-        r, _ = self.run_with([bsky_post("dan.bsky.social", "Nederland, CO folks: don't drink tap water until boiled", rkey="4"),
-                                bsky_post("fda.bot", "Sanniu Nederland Biscuits recalled: undeclared milk", rkey="6"),
-                                bsky_post("fda.bot2", "Nederland Biscuits recall notice", rkey="7")])
-        self.assertEqual(r["raised"], 1)
-        title = [d for ev, d in self.heard if d.get("tag", "").startswith("chatter-")][0]["title"]
-        self.assertEqual(title, "Unconfirmed, near Jordan (Nederland): people are posting about a water problem (boil or don't drink)")
-        self.assertFalse([p for p in localwatch.recent(self.st) if "Biscuits" in p["text"]])  # a product, not the town
-        r, _ = self.run_with([bsky_post("eve.bsky.social", "Boil water still on in Nederland", rkey="5")])
-        self.assertEqual(r["raised"], 0)                    # once a day
-
-    def test_reported_by_news_and_reddit(self):
-        localwatch.save_settings(self.st, self.dir, {"reddit_id": "abcDEF123456", "reddit_secret": "s" * 30, "subreddits": "Denver\nNederlandCO"})
-        mode = stat.S_IMODE(os.stat(self.dir / localwatch.SECRET_FILE).st_mode)
-        self.assertEqual(mode, 0o600)
-        listing = {"data": {"children": [
-            {"data": {"title": "Water main break, boil order?", "selftext": "Anyone else on the north side?", "author": "u1",
-                      "subreddit": "NederlandCO", "permalink": "/r/NederlandCO/comments/1/x/", "created_utc": (NOW - timedelta(minutes=30)).timestamp()}},
-            {"data": {"title": "Outage in Lakewood", "selftext": "", "author": "u2", "subreddit": "Denver",
-                      "permalink": "/r/Denver/comments/2/y/", "created_utc": NOW.timestamp()}}]}}
-        localwatch._token.update(value="", until=0.0)
-        r, web = self.run_with([], reddit=listing)
-        auths = [h.get("Authorization", "") for u, h, _ in web.asked if "oauth.reddit.com" in u]
-        self.assertEqual(auths, ["Bearer tok"])
-        self.assertTrue(any(u.endswith("/r/Denver+NederlandCO/new?limit=100&raw_json=1") for u, _, _ in web.asked))
-        posts = localwatch.recent(self.st)
-        self.assertEqual([(p["channel"], p["place"]) for p in posts], [("r/NederlandCO", "Nederland")])  # Lakewood isn't a family town
-        # a news outlet reports it: the post says so, and posts already reported don't raise a heads-up
-        news.refresh(self.st, [{"outlet": "local", "title": "Nederland urged to not drink water unless boiled", "url": "https://n/1",
-                                "summary": "Reported by KDVR.", "at": NOW.isoformat()}])
-        localwatch.confirm(self.st)
-        p = localwatch.recent(self.st)[0]
-        self.assertEqual(p["reported_by"], "KDVR")
-        self.assertIn("Nederland urged", p["story_headline"])
-
-    def test_settings_checks(self):
-        v = localwatch.save_settings(self.st, self.dir, {"subreddits": "r/Denver, /r/Colorado", "bluesky": False})
-        self.assertEqual((v["subreddits"], v["bluesky"], v["reddit_ready"]), (["Denver", "Colorado"], False, False))
-        for bad in ({"subreddits": "not ok!"}, {"reddit_id": "x"}, {"reddit_secret": "short"}):
-            with self.assertRaises(ValueError):
-                localwatch.save_settings(self.st, self.dir, bad)
-        r, web = self.run_with([bsky_post("a.b", "Nederland boil water", rkey="9")])
-        self.assertEqual(web.asked, [])                    # Bluesky off, Reddit not set up: nothing fetched
+class SettingsTests(Base):
+    def test_only_extra_towns_remain(self):
+        v = localwatch.save_settings(self.st, {"extra_places": "Conifer, CO", "subreddits": "Denver", "bluesky": True})
+        self.assertEqual(v["extra_places"], ["Conifer, CO"])
+        self.assertNotIn("subreddits", v)     # the posts layer (Bluesky, Reddit) is gone
 
 
 class HttpTests(unittest.TestCase):
@@ -218,11 +157,9 @@ class HttpTests(unittest.TestCase):
 
     def test_routes(self):
         self.assertEqual(self.req("GET", "/api/localwatch", user="kid")[0], 403)
-        code, v = self.req("POST", "/api/localwatch", {"extra_places": "Nederland, CO", "reddit_id": "abcDEF123456", "reddit_secret": "q" * 30})
-        self.assertEqual((code, [p["name"] for p in v["places"]], v["reddit_ready"]), (200, ["Nederland"], True))
-        self.assertNotIn("q" * 30, json.dumps(self.req("GET", "/api/localwatch")[1]))
-        code, c = self.req("GET", "/api/news/chatter", user="kid")
-        self.assertEqual((code, c["places"], c["posts"]), (200, ["Nederland"], []))
+        code, v = self.req("POST", "/api/localwatch", {"extra_places": "Nederland, CO"})
+        self.assertEqual((code, [p["name"] for p in v["places"]]), (200, ["Nederland"]))
+        self.assertEqual(self.req("GET", "/api/news/chatter", user="kid")[0], 404)   # Unconfirmed is gone
 
 
 if __name__ == "__main__":

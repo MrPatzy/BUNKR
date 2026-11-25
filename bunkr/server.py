@@ -26,9 +26,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
+from . import phone as phoneapp
 from . import comms, partners, brief, flights, homeassistant, mesh, meshbot, news, checkins, chirp, family, field, notify, situation, maps as mapspack, mcp, mcp_tools, radioplan, radio, releases, scenarios
 from . import ai as aimod
-from . import meshcore, meshinfo, places, wx
+from . import features as preview, invimport
+from . import forecasts, meshcore, meshinfo, places, station, wx
 from . import packages as ospackages
 from . import packs as offpacks
 from . import foodsources, labelread
@@ -70,6 +72,7 @@ OFFLINE_HEADS = {"state", "me", "board", "family", "medical", "situation", "brie
 COMMS_HEADS = {"comms", "licences", "neighbours", "nets", "net-log", "ics213", "partners", "partner-shares"}
 QUIET_CHANGES = ("/api/me/home", "/api/me/news", "/api/news/read", "/api/news/rate", "/api/notices/read")
 _pair_failures = []
+_app_pair_failures = []           # wrong phone pairing codes (bunkr/phone.py), all callers together
 MAX_BODY = 4 * 1024 * 1024        # a JSON request body; a node's record sync may send more (MAX_SYNC_BODY)
 MAX_SYNC_BODY = 64 * 1024 * 1024
 LOGIN_IP_FAILS = 20               # failed logins from one address within LOGIN_IP_WINDOW before it has to wait
@@ -91,11 +94,15 @@ MESH = {"link": None}  # the MeshCore radio link on this machine (bunkr/mesh.py)
 BRIEF = {"enabled": True, "time": "06:30", "tz": "America/Denver", "ai": True}    # --brief-* options; "ai": False = --no-brief-ai
 _brief_lock = threading.Lock()
 scheduler = None
+DEMO = False   # --demo: a made-up household; no background jobs, radio or notifications
 job = builder.Job()
 depot_job = builder.Job()   # downloads-store fetches, verification, document archive
 ALERT_REFRESH = 15 * 60
 HAZARD_REFRESH = 30 * 24 * 3600
 backup_lock = threading.Lock()
+
+
+_HELD = {"app": "phone_app", "station": "weather_station", "inventory-template.csv": "csv_import"}   # route -> held-back feature
 
 
 class ApiError(Exception):
@@ -197,6 +204,21 @@ def save_site(data, row_id=None):
     return store.site(site_id)
 
 
+def features():
+    """What's set up, so the everyday screens leave out what isn't (admins set it up under Setup)."""
+    m = mesh.settings(store)
+    return {"mesh": bool(m.get("enabled") and m.get("connect")),
+            "radios": bool(store._rows("SELECT 1 FROM radios LIMIT 1"))}
+
+
+def label_base(handler):
+    """BUNKR's address for a label's link: the public one when set (works at home and away), else the one in use."""
+    if PUBLIC_URL:
+        return PUBLIC_URL
+    host = handler.headers.get("Host") or "127.0.0.1"
+    return ("https://" if handler._secure() else "http://") + host
+
+
 def full_state(user=None):
     s = store.settings()
     role = (user or {"role": "admin"})["role"]
@@ -218,7 +240,8 @@ def full_state(user=None):
             "categories": gaps.CATEGORIES, "essentials": gaps.ESSENTIALS, "checklist": gaps.CHECKLIST,
             "doc_types": gaps.DOC_TYPES, "location_kinds": LOCATION_KINDS, "site_kinds": SITE_KINDS,
             "hazard_names": hazards.HAZARDS,
-            "me": user or {"username": "local", "role": "admin"}, "require_login": REQUIRE_LOGIN,
+            "me": user or {"username": "local", "role": "admin"}, "require_login": REQUIRE_LOGIN, "demo": DEMO,
+            "features": features(),
             "ammo": gaps.ammo_summary(items), "magazines": gaps.magazine_summary(items), "subtypes": gaps.SUBTYPES,
             "ammo_types": gaps.AMMO_TYPES, "mag_status": gaps.MAG_STATUS,
             "node_role": ROLE, "hub_url": HUB_URL, "last_node_sync": store.get_raw("last_node_sync", ""), "version": __version__,
@@ -234,10 +257,13 @@ def home_state(user):
     places = [{"id": s["id"], "name": s["name"], "kind": s["kind"], "address": s["address"], "lat": s["lat"], "lon": s["lon"]}
               for s in store.sites()]
     top = [i for i in situation.items(store) if i["tier"] in ("flash", "priority")][:5]
-    return {"situation_top": top, "board": family_board(), "me_person": {"uid": me["uid"], "name": me["name"], "role": me["role"]} if me else None,
+    calls = [r["callsign"] for r in store._rows("SELECT callsign FROM licences WHERE person_id=? AND callsign<>'' ORDER BY id", (me["id"],))] if me else []
+    return {"situation_top": top, "board": family_board(),
+            "me_person": {"uid": me["uid"], "name": me["name"], "role": me["role"], "callsigns": list(dict.fromkeys(calls))} if me else None,
             "can_call": checkins.can_call(store, user) if user else True, "view": view, "places": places,
             "contacts": store._rows("SELECT name, relation, phone, out_of_area FROM contacts ORDER BY out_of_area DESC, name"),
-            "news_home": news_home(user), "home_layout": homelayout.for_user(store, user), "home_tiles": [{"id": t, "title": n, "who": w} for t, n, w in homelayout.TILES],
+            "news_home": news_home(user), "weather_home": forecasts.home_view(store), "station_now": station.now_view(store) if preview.enabled("weather_station") else None, "preview": preview.on(),
+            "label_base": PUBLIC_URL, "home_layout": homelayout.for_user(store, user), "home_tiles": [{"id": t, "title": n, "who": w} for t, n, w in homelayout.TILES],
             "last_call": last_call_report(), "med_due": med_due_for(user), "unread": notify.unread(store, (user or {}).get("id")), "backup_status": dbcheck.status(store) if role == "admin" and ROLE not in ("pi", "laptop") else None,
             "host_status": store.get_raw("host_status") if role == "admin" and ROLE not in ("pi", "laptop") else None,
             "library": {"ready": kiwix_ready(), "address": store.get_raw("library_url", "") or "", "port": kiwix.PORT,
@@ -256,7 +282,7 @@ def family_board():
 
 def news_home(user):
     """For the Home tile: the brief in a line, and this person's top unread stories."""
-    rec = brief.latest(store)
+    rec = brief.personalise(store, brief.latest(store), (user or {}).get("id"))
     top = news.feed(store, (user or {}).get("id"), unread=True, limit=4, with_items=False)
     if not rec and not store.get_raw("news_refreshed", ""):
         return None
@@ -889,7 +915,7 @@ def nightly_updates():
 CHANNEL_FIELDS = ("name", "grp", "service", "rx_mhz", "duplex", "offset_mhz", "tone_mode", "tone_hz", "dtcs",
                   "mode", "power", "in_plan", "notes", "sort", "tx_tone", "rx_tone", "slot", "system", "region",
                   "status", "source", "scan", "watch", "short", "rx_only", "wiresx", "radios")
-RADIO_FIELDS = ("name", "model", "kind", "service", "chirp_driver", "notes", "profile", "owner")
+RADIO_FIELDS = ("name", "model", "kind", "service", "chirp_driver", "notes", "profile", "owner", "location_id")
 CHANNEL_STATUS = ("", "verified", "confirm", "hold", "down")
 
 
@@ -1140,7 +1166,7 @@ def build_maps_job(jb):
             jb.bytes_done, jb.bytes_total = done, total
     jb.step = "Preparing the maps pack"
     mapspack.build(depot, store, store.sites(), progress=prog, cancelled=lambda: jb.cancelled, log=jb.say)
-    jb.say("Maps pack ready. Open it from Sites & alerts, Maps; nodes get it on their next sync.")
+    jb.say("Maps pack ready. Open it from Sites & maps; nodes get it on their next sync.")
 
 
 def maps_refresh():
@@ -1258,7 +1284,14 @@ class Handler(BaseHTTPRequestHandler):
         return self.headers.get("X-Forwarded-Proto", "").lower() == "https"
 
     def _session(self):
+        phone_user = phoneapp.user_for_key(store, self._bearer()) if preview.enabled("phone_app") else None   # the phone app: its own key, no password or cookie
+        if phone_user:
+            return phone_user
         if not REQUIRE_LOGIN:
+            if DEMO:  # the demo is used as Alex, so Home shows Alex's own check-in buttons
+                u = auth.user_by_name(store, "alex")
+                if u:
+                    return {"id": u["id"], "username": u["username"], "role": u["role"]}
             return {"id": 0, "username": "local", "role": "admin"}
         return auth.session_user(store, auth.token_from_cookie(self.headers.get("Cookie")))
 
@@ -1295,11 +1328,19 @@ class Handler(BaseHTTPRequestHandler):
                 return self._field_checkin()
             if url.path.startswith("/api/partner/"):  # a partner hub reading its share: its own token, no login
                 return self._partner_feed(method, url.path[len("/api/partner/"):])
+            if url.path.startswith("/station/"):  # a weather station's reading: its key is in the address, no login
+                if not preview.enabled("weather_station"):
+                    return self._send(404, {"error": "not found"})
+                return self._station_in(method, url)
             self._guard(method != "GET")
             if url.path == "/api/login" and method == "POST":
                 return self._login()
             if url.path in ("/api/login/code", "/api/login/passkey-options", "/api/login/passkey") and method == "POST":
                 return self._login(url.path.rsplit("/", 1)[1])
+            if url.path == "/api/app/pair" and method == "POST":
+                if not preview.enabled("phone_app"):
+                    return self._send(404, {"error": "not found"})
+                return self._app_pair()
             user = self._session()
             if user and user.get("scope") == "setup" and not (
                     url.path in ("/api/me", "/api/logout") or url.path.startswith(("/api/me/two-step", "/api/me/passkeys"))):
@@ -1322,6 +1363,11 @@ class Handler(BaseHTTPRequestHandler):
                     return self._redirect("/login.html")
                 if url.path.startswith("/store/"):
                     return self._store_file(url.path[len("/store/"):])
+                if url.path == "/app/bunkr.apk" and preview.enabled("phone_app"):
+                    apk = phoneapp.latest_apk(depot.root)
+                    if not apk:
+                        raise ApiError(404, "this hub has no app file yet")
+                    return self._send(200, apk["path"].read_bytes(), "application/vnd.android.package-archive")
                 return self._static(url.path)
             if url.path == "/api/logout" and method == "POST":
                 if user:
@@ -1337,6 +1383,8 @@ class Handler(BaseHTTPRequestHandler):
             self.user = user
             if head in ADMIN_HEADS and user["role"] != "admin":
                 raise ApiError(403, "only an admin can do that")
+            if url.path == "/api/app/stream" and method == "GET" and preview.enabled("phone_app"):
+                return self._app_stream(parse_qs(url.query))
             self._audit_what = None
             before = self._sensitive_item(url.path)
             result = self._api(method, url.path, parse_qs(url.query))
@@ -1494,6 +1542,8 @@ class Handler(BaseHTTPRequestHandler):
         sub = parts[1] if len(parts) > 1 else ""
         if method == "GET" and sub == "":
             return {"flights": flights.board(store)}
+        if method == "GET" and sub == "airlines":  # the names offered as someone types
+            return {"airlines": [{"name": v[1], "code": k} for k, v in sorted(flights.AIRLINES.items(), key=lambda kv: kv[1][1].lower())]}
         if sub == "settings":
             if self.user["role"] != "admin":
                 raise ApiError(403, "only an admin can do that")
@@ -1517,8 +1567,12 @@ class Handler(BaseHTTPRequestHandler):
                 raise ApiError(400, "your login isn't linked to a person yet: link it on the Family tab")
             allowed(who)
             try:
+                if not data.get("callsign"):
+                    q = flights.ask(store, data.get("number"), flights.load_key(Path(store.path).parent))
+                    if q:
+                        return {"confirm": q}  # nothing is tracked until they pick
                 f = flights.add(store, who, data.get("number"), origin=data.get("origin") or "", dest=data.get("dest") or "",
-                                by=self.user.get("username", ""), home=home_airport())
+                                by=self.user.get("username", ""), home=home_airport(), callsign=data.get("callsign") or "")
             except ValueError as exc:
                 raise ApiError(400, str(exc))
             threading.Thread(target=check_flights, daemon=True).start()
@@ -1542,6 +1596,13 @@ class Handler(BaseHTTPRequestHandler):
                 return news.save_prefs(store, uid, self._body())
             return news.prefs(store, uid)
         sub = parts[1] if len(parts) > 1 else ""
+        if sub == "sources":  # every outlet: an admin turns them on and off for everyone; each person hides their own
+            if method == "POST":
+                if self.user["role"] != "admin":
+                    raise ApiError(403, "only an admin can change which outlets are fetched")
+                off = news.set_outlets_off(store, self._body().get("off"))
+                audit.record(store, self.user, "change", "news", f"outlets off: {', '.join(off) or 'none'}", self._client_ip())
+            return {"sources": news.sources(store, uid)}
         if method == "GET" and sub == "":
             area, topic = arg("area"), arg("topic")
             try:
@@ -1573,9 +1634,6 @@ class Handler(BaseHTTPRequestHandler):
                 raise ApiError(403, "only an admin can do that")
             threading.Thread(target=refresh_news, daemon=True).start()
             return {"ok": True}
-        if method == "GET" and sub == "chatter":
-            return {"posts": localwatch.recent(store), "places": [p["label"] for p in localwatch.places(store)],
-                    "status": store.get_raw("localwatch_status", {}) or {}}
         if sub == "flags":
             # anyone can flag a source that doesn't belong; admins review
             fid = _num(parts[2], int, None) if len(parts) > 2 else None
@@ -1607,6 +1665,31 @@ class Handler(BaseHTTPRequestHandler):
                     raise ApiError(400, str(exc))
         raise ApiError(404, "not found")
 
+    def _station_in(self, method, url):
+        """A reading from the home weather station, in BUNKR's JSON, Weather Underground's or Ecowitt's format."""
+        if method not in ("GET", "POST") or store is None:
+            return self._send(405, {"error": "GET or POST"})
+        if not station.key_ok(store, url.path[len("/station/"):].strip("/")):
+            return self._send(403, {"error": "unknown station key"})
+        params = {k: v[0] for k, v in parse_qs(url.query).items()}
+        if method == "POST":
+            raw = self._read_raw(64 * 1024)
+            ctype = (self.headers.get("Content-Type") or "").lower()
+            try:
+                body = json.loads(raw) if raw and "json" in ctype else {k: v[0] for k, v in parse_qs(raw.decode("utf-8", "replace")).items()}
+            except (ValueError, UnicodeDecodeError):
+                return self._send(400, {"error": "a JSON object or a form"})
+            if isinstance(body, dict):
+                params.update(body)
+        try:
+            reading = station.normalize(params)
+        except ValueError as exc:
+            return self._send(400, {"error": str(exc)})
+        station.record(store, reading)
+        home = next((s for s in store.sites() if s["kind"] == "home"), None)
+        station.publish(store, home)
+        return self._send(200, {"ok": True}) if "json" in (self.headers.get("Content-Type") or "") else self._send(200, b"success", "text/plain")
+
     def _field_checkin(self):
         """A check-in from the field page: anyone on the field Wi-Fi (the Wi-Fi password is the gate) or logged in."""
         origin = self.headers.get("Origin") or ""
@@ -1623,6 +1706,69 @@ class Handler(BaseHTTPRequestHandler):
             raise ApiError(400, str(exc))
         audit.record(store, None, "change", "checkins", "check-in from the field page", self._client_ip())
         return self._redirect("/field?sent=1#family")
+
+    def _app_pair(self):
+        """The phone app trades a one-time code for its key. No login; wrong tries are limited for everyone together."""
+        import time
+        now_t = time.time()
+        _app_pair_failures[:] = [t for t in _app_pair_failures if now_t - t < 900]
+        if len(_app_pair_failures) >= 10:
+            raise ApiError(429, "too many pairing attempts; wait 15 minutes")
+        data = self._body()
+        res = phoneapp.exchange(store, str(data.get("code") or ""), str(data.get("name") or ""))
+        if not res:
+            _app_pair_failures.append(now_t)
+            raise ApiError(403, "pairing code wrong, used or expired")
+        audit.record(store, {"id": 0, "username": res["username"]}, "login", "phone app", f"paired phone: {data.get('name') or 'Phone'}",
+                     self._client_ip())
+        self._send(200, res | {"hubs": self._hub_addresses()})
+
+    def _hub_addresses(self):
+        """Addresses the app can reach this hub at, home network first: the hub's own address on the network this request
+        reached it by (so a QR code made through a tunnel or proxy still works at home), the public one when set, and the
+        one the browser used. A tunnel address can sit behind a sign-in page such as Cloudflare Access, which the app
+        can't get through (android/README.md, "Pairing problems")."""
+        out = []
+        try:
+            ip, port = self.connection.getsockname()[:2]
+            a = ipaddress.ip_address(ip.split("%")[0])
+            if a.version == 6 and a.ipv4_mapped:
+                a = a.ipv4_mapped
+            ip = str(a)
+            if not (a.is_loopback or a.is_unspecified or a.is_link_local):
+                out.append(f"http://[{ip}]:{port}" if a.version == 6 else f"http://{ip}:{port}")
+        except (OSError, ValueError, TypeError, AttributeError):
+            pass
+        if PUBLIC_URL:
+            out.append(PUBLIC_URL.rstrip("/"))
+        host = self.headers.get("Host")
+        if host:
+            out.append(("https://" if self._secure() else "http://") + host)
+        return list(dict.fromkeys(out))
+
+    def _app_stream(self, query):
+        """Server-Sent Events for a paired phone: new notifications as they happen, and what it missed since its last id."""
+        if not self.user.get("phone_id"):
+            raise ApiError(403, "the stream is for a paired phone: use its phone key")
+        raw = self.headers.get("Last-Event-ID") or (query.get("last_id") or [""])[0]
+        try:
+            last = int(raw) if str(raw).strip() else None
+        except ValueError:
+            last = None
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Accel-Buffering", "no")   # a proxy in front shouldn't hold the stream back
+        self.send_header("Connection", "close")
+        self._safety_headers("text/event-stream")
+        self.end_headers()
+        self.close_connection = True
+        try:
+            for chunk in phoneapp.follow(store, self.user["phone_id"], last):
+                self.wfile.write(chunk)
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, TimeoutError, OSError):
+            pass
 
     def _client_ip(self):
         """Where a request came from. Through the Cloudflare tunnel, the visitor's address is in CF-Connecting-IP."""
@@ -1805,6 +1951,65 @@ class Handler(BaseHTTPRequestHandler):
             except ApiError as exc:
                 problems.append(f"line {n}: {exc}")
         return {"added": len(added), "ids": added, "problems": problems}
+
+    def _import_items(self, data):
+        """CSV import. Without `confirm` it only previews (nothing is saved, no location is created);
+        with `confirm` it saves. A duplicate is the same name + location + expiry date."""
+        headers, table = invimport.read(str(data.get("csv") or ""))
+        if not headers or not table:
+            raise ApiError(400, "no rows found in that file")
+        mapping = invimport.clean_mapping(data.get("mapping"), len(headers)) if data.get("mapping") else invimport.guess(headers)
+        rows = invimport.rows_for(headers, table, mapping)
+        mode = data.get("mode") if data.get("mode") in ("overwrite", "new", "add") else "add"
+        modes = data.get("modes") if isinstance(data.get("modes"), dict) else {}
+        locs = {l["name"].lower(): l["id"] for l in store.locations()}
+
+        def key(name, loc_id, expires):
+            return (name.strip().lower(), loc_id, expires or "")
+
+        def existing():
+            return {key(i["name"], i["location_id"], i["expires"]): i
+                    for i in store.items() if i["category"] not in gaps.SENSITIVE}
+
+        have = existing()
+        if not data.get("confirm"):
+            out = []
+            for r in rows:
+                d, loc_id = r["data"], locs.get(r["location"].lower()) if r["location"] else None
+                dup = None if r["problem"] else have.get(key(d.get("name", ""), loc_id, d.get("expires")))
+                out.append({"n": r["n"], "name": d.get("name", ""), "category": d.get("category", ""),
+                            "quantity": d.get("quantity", ""), "unit": d.get("unit", ""), "location": r["location"],
+                            "new_location": bool(r["location"]) and loc_id is None, "expires": d.get("expires", ""),
+                            "problem": r["problem"],
+                            "dup": {"id": dup["id"], "quantity": dup["quantity"], "unit": dup["unit"]} if dup else None})
+            return {"headers": headers, "mapping": mapping, "fields": invimport.FIELDS, "labels": invimport.LABELS,
+                    "rows": out, "samples": table[:3],
+                    "capped": len(table) >= invimport.MAX_ROWS}
+        added = overwritten = summed = 0
+        problems = []
+        for r in rows:
+            if r["problem"]:
+                problems.append(f"line {r['n']}: {r['problem']}")
+                continue
+            try:
+                d = dict(r["data"])
+                loc_id = resolve_location({"location": r["location"]}) if r["location"] else None
+                found = have.get(key(d.get("name", ""), loc_id, d.get("expires")))
+                how = modes.get(str(r["n"])) if modes.get(str(r["n"])) in ("overwrite", "new", "add") else mode
+                if found and how == "overwrite":
+                    store.save_item(clean_item(found | d | {"location_id": loc_id}), found["id"])
+                    overwritten += 1
+                elif found and how == "add":
+                    store.save_item(clean_item(found | {"quantity": found["quantity"] + (d.get("quantity") or 0),
+                                                        "location_id": loc_id}), found["id"])
+                    summed += 1
+                else:
+                    store.save_item(clean_item(d | {"location_id": loc_id}))
+                    added += 1
+                have = existing()
+            except ApiError as exc:
+                problems.append(f"line {r['n']}: {exc}")
+        return {"added": added, "overwritten": overwritten, "summed": summed, "problems": problems}
 
     def _recovery(self, method, parts, query):
         """Home inventory for insurance. Everyone sees it; adults change it; serial numbers and receipts are admin-only."""
@@ -2260,7 +2465,8 @@ class Handler(BaseHTTPRequestHandler):
                                          since, source=node["name"])
                 checkins.apply(store, {k: data.get(k, []) for k in ("checkins", "calls")})
                 changes = (sync.export_records(store, since) | checkins.export(store, since, include_people=True)
-                           | situation.export(store, since) | brief.export(store, since) | comms.export(store))
+                           | situation.export(store, since) | brief.export(store, since) | comms.export(store)
+                           | forecasts.export(store, since))
                 return self._send(200, {"changes": changes, "cursor": cursor,
                                         "applied": res["applied"], "conflicts": res["conflicts"]})
             raise ApiError(404, "unknown sync endpoint")
@@ -2406,6 +2612,10 @@ class Handler(BaseHTTPRequestHandler):
                 return {"items": quickadd.parse(str(self._body().get("text") or "")[:20000])}
             if (method, parts[1:2]) == ("POST", ["bulk"]):
                 return self._bulk_items(self._body())
+            if (method, parts[1:2]) == ("POST", ["import"]):
+                if not preview.enabled("csv_import"):
+                    raise ApiError(404, "not found")
+                return self._import_items(self._body())
             if method == "POST" and row_id and parts[2:3] == ["bump"]:
                 rows = store._rows("SELECT * FROM items WHERE id=?", (row_id,))
                 if not rows or (rows[0]["category"] in gaps.SENSITIVE and self.user["role"] != "admin"):
@@ -2486,6 +2696,11 @@ class Handler(BaseHTTPRequestHandler):
             return export.shopping_html(st["shopping"]), "text/html; charset=utf-8"
         if (method, head) == ("GET", "shopping.csv"):
             return export.shopping_csv(full_state(self.user)["shopping"]), "text/csv; charset=utf-8"
+        if (method, head) == ("GET", "labels.html"):
+            st = full_state(self.user)
+            want = {x for x in (parse_qs(urlparse(self.path).query).get("ids") or [""])[0].split(",") if x}
+            locs = [l for l in st["locations"] if not want or str(l["id"]) in want]
+            return export.labels_html(locs, st["items"], label_base(self)), "text/html; charset=utf-8"
         if method == "GET" and head == "packing" and row_id:
             loc = store.location(row_id)
             if not loc:
@@ -2675,7 +2890,10 @@ class Handler(BaseHTTPRequestHandler):
                           "chirp_driver": (data.get("chirp_driver") or "").strip()[:60],
                           "notes": (data.get("notes") or "").strip()[:300],
                           "profile": data.get("profile") if data.get("profile") in radioplan.PROFILES else "",
-                          "owner": (data.get("owner") or "").strip()[:60]}
+                          "owner": (data.get("owner") or "").strip()[:60],
+                          "location_id": _num(data.get("location_id"), int, None) or None}
+                if fields["location_id"] and not store.location(fields["location_id"]):
+                    raise ApiError(400, "unknown location")
                 if fields["profile"] == "gm15pro":
                     fields["service"] = "gmrs"
                 new_id = save_row("radios", RADIO_FIELDS, fields, row_id)
@@ -2758,9 +2976,20 @@ class Handler(BaseHTTPRequestHandler):
         if head == "brief":
             sub_ = parts[1] if len(parts) > 1 else ""
             if method == "GET":
-                rec = brief.latest(store, query.get("day", [None])[0])
+                rec = brief.personalise(store, brief.latest(store, query.get("day", [None])[0]), self.user.get("id"))
                 return {"brief": rec, "days": brief.days(store), "settings": {k: BRIEF[k] for k in ("enabled", "time", "tz")} | {"ai": BRIEF["ai"] and aimod.summaries_on(store)},
                         "running": _brief_lock.locked()}
+            if (method, sub_) == ("POST", "feedback"):
+                d = self._body()
+                action = d.get("action")
+                if action not in ("done", "not_for_me") or d.get("kind") not in ("ai", "group") or not isinstance(d.get("index"), int):
+                    raise ApiError(400, "action is done or not_for_me, kind is ai or group, index is a number")
+                rec = brief.latest(store, str(d.get("day") or "") or None)
+                try:
+                    brief.finish(store, self.user.get("id"), rec or {}, d["kind"], d["index"], teach=action == "not_for_me")
+                except KeyError:
+                    raise ApiError(404, "no such story")
+                return {"ok": True}
             if (method, sub_) == ("POST", "run"):
                 if self.user["role"] != "admin":
                     raise ApiError(403, "only an admin can do that")
@@ -2770,6 +2999,40 @@ class Handler(BaseHTTPRequestHandler):
                     return {"started": False, "running": True}
                 threading.Thread(target=make_brief, kwargs={"force": True}, daemon=True).start()
                 return {"started": True}
+        if head in ("app", "station", "inventory-template.csv") and not preview.enabled(_HELD[head]):
+            raise ApiError(404, "not found")
+        if head == "app":   # the phone app: pairing code, paired phones (pair and stream are in _dispatch)
+            uid_ = self.user.get("id") or 0
+            sub_ = parts[1] if len(parts) > 1 else ""
+            if (method, sub_) == ("POST", "code"):
+                from . import qr
+                if not uid_:
+                    raise ApiError(400, "pairing a phone needs a login of your own")
+                if self.user.get("phone_id"):
+                    raise ApiError(403, "pair a new phone from a browser, not from the app")
+                code, expires = phoneapp.new_code(store, uid_)
+                hubs = self._hub_addresses()
+                link = phoneapp.pair_link(code, hubs)
+                return {"code": code, "expires": expires, "minutes": phoneapp.CODE_MINUTES, "hubs": hubs, "link": link,
+                        "svg": qr.svg(link, module=5)}
+            if (method, sub_) == ("POST", "open"):   # the app's web view signs in with the phone key: a normal session cookie
+                if not self.user.get("phone_id"):
+                    raise ApiError(403, "this is for a paired phone: use its phone key")
+                self._extra.append(("Set-Cookie", auth.cookie_header(auth.new_session(store, uid_, "BUNKR app"), self._secure())))
+                return {"ok": True}
+            if (method, sub_) == ("GET", "version"):   # the newest app file on this hub, for "new version, tap to install"
+                return phoneapp.apk_info(depot.root)
+            if (method, sub_) == ("GET", "phones"):
+                everyone = self.user["role"] == "admin" and query.get("all", [""])[0] == "1"
+                return {"phones": phoneapp.phones(store, None if everyone else uid_), "all": everyone}
+            if method == "DELETE" and sub_ == "phones" and len(parts) == 3 and parts[2].isdigit():
+                owner = phoneapp.phone_owner(store, int(parts[2]))
+                if owner is None:
+                    raise ApiError(404, "no such phone")
+                if owner != uid_ and self.user["role"] != "admin":
+                    raise ApiError(403, "that phone isn't yours")
+                phoneapp.remove(store, int(parts[2]))
+                return {"ok": True}
         if head == "push":
             sub_ = parts[1] if len(parts) > 1 else ""
             uid_ = self.user.get("id") or 0
@@ -2802,10 +3065,11 @@ class Handler(BaseHTTPRequestHandler):
             if (method, sub_) == ("POST", "test"):
                 if not notifier:
                     raise ApiError(400, "notifications are off on this node")
-                res = notify.send(store, notifier.key, "test", {"user_id": uid_})
-                if not res:
+                res = notify.send(store, notifier.key, "test", {"user_id": uid_}, phone=True)
+                if not res and not phoneapp.has_phones(store, uid_):
                     raise ApiError(400, "this login has no phone set up for notifications yet")
-                return {"sent": sum(1 for _, st in res if 200 <= st < 300), "tried": len(res)}
+                return {"sent": sum(1 for _, st in res if 200 <= st < 300), "tried": len(res),
+                        "app": phoneapp.has_phones(store, uid_)}
         if head == "notices":
             uid_ = self.user.get("id") or 0
             if method == "GET":
@@ -2883,16 +3147,33 @@ class Handler(BaseHTTPRequestHandler):
                     return kroger.save_settings(store, folder, self._body())
                 except ValueError as exc:
                     raise ApiError(400, str(exc))
+        if head == "station":  # admin: set up the home weather station, see what it sends
+            if self.user["role"] != "admin":
+                raise ApiError(403, "only an admin can set up the weather station")
+            if method == "POST":
+                body = self._body()
+                act = body.get("action")
+                if act == "new_key":
+                    station.new_key(store, body.get("name"))
+                    audit.record(store, self.user, "change", "weather station", "new station key", self._client_ip())
+                elif act == "forget":
+                    station.forget(store)
+                else:
+                    raise ApiError(400, "action is new_key or forget")
+            s = station.settings(store)
+            base = label_base(self).rstrip("/")
+            return {"set_up": bool(s.get("key")), "name": s.get("name", ""), "since": s.get("since", ""),
+                    "url": f"{base}/station/{s['key']}" if s.get("key") else "", "now": station.now_view(store),
+                    "last": station.latest(store), "history": station.history(store, 24)}
         if head == "localwatch":
-            folder = Path(store.path).parent
             if method == "GET":
-                return localwatch.view(store, folder) | {"news": store.get_raw("localwatch_news", {}) or {}}
+                return localwatch.view(store) | {"news": store.get_raw("localwatch_news", {}) or {}}
             if method == "POST" and parts[1:] == ["run"]:
-                threading.Thread(target=lambda: (refresh_news(brief.FAST), localwatch.run(store, folder)), daemon=True).start()
+                threading.Thread(target=refresh_news, args=(brief.FAST,), daemon=True).start()
                 return {"ok": True}
             if method == "POST" and len(parts) == 1:
                 try:
-                    return localwatch.save_settings(store, folder, self._body())
+                    return localwatch.save_settings(store, self._body())
                 except ValueError as exc:
                     raise ApiError(400, str(exc))
         if head == "mail":
@@ -2939,15 +3220,21 @@ class Handler(BaseHTTPRequestHandler):
                 lat, lon = checkins._coord(data.get("lat"), 90), checkins._coord(data.get("lon"), 180)
                 at_airport = flights.airport_near(lat, lon)
                 if data.get("flight"):
-                    flights.parse_number(data["flight"])  # refuse a bad flight number before saving anything
+                    if data.get("callsign"):
+                        flights.parse_number(data["flight"])  # they picked it, but still refuse a bad one before saving
+                    else:  # refuse or question a flight number before saving anything
+                        q = flights.ask(store, data["flight"], flights.load_key(Path(store.path).parent))
+                        if q:
+                            return {"confirm": q}
                 place = data.get("place") or (f"{at_airport['iata']} airport" if at_airport else "")
                 rec = checkins.add_checkin(store, who, data.get("status"), data.get("note"), place, lat, lon,
                                            data.get("via") or "app", by_name=by,
                                            battery_level=None if by else data.get("battery"),  # someone else's phone isn't theirs
-                                           battery_low=bool(data.get("battery_low")))
+                                           battery_low=bool(data.get("battery_low")), accuracy=data.get("accuracy"))
                 if data.get("flight"):
                     rec["flight"] = flights.add(store, who, data["flight"], origin=at_airport["iata"] if at_airport else "",
-                                                by=self.user.get("username", ""), home=home_airport())["uid"]
+                                                by=self.user.get("username", ""), home=home_airport(),
+                                                callsign=data.get("callsign") or "")["uid"]
                     threading.Thread(target=check_flights, daemon=True).start()
                 elif at_airport and not any(f["person_uid"] == who for f in flights.active(store)):
                     rec["airport"] = {k: at_airport[k] for k in ("iata", "name", "city")}
@@ -3340,6 +3627,9 @@ class Handler(BaseHTTPRequestHandler):
             return kids_plan(), "text/html; charset=utf-8"
         if (method, head) == ("GET", "export.csv"):
             return export.inventory_csv(gaps.visible(store.items(), self.user["role"])), "text/csv; charset=utf-8"
+        if (method, head) == ("GET", "inventory-template.csv"):
+            self._extra.append(("Content-Disposition", 'attachment; filename="inventory-template.csv"'))
+            return invimport.template_csv(), "text/csv; charset=utf-8"
         if (method, head) == ("GET", "report.html"):
             s = store.settings()
             return export.report_html(s, gaps.visible(store.items(), self.user["role"]), store.documents()), "text/html; charset=utf-8"
@@ -3426,11 +3716,12 @@ def bot_context():
         st = st if st in places.STATES else ""
         home_place = {"lat": home_site["lat"], "lon": home_site["lon"], "label": home_site["name"][:24], "state": st,
                       "tz": places.STATE_TZ.get(st) or BRIEF["tz"], "kind": "home"}
-    ctx = {"geo_folder": folder, "home": home_place or {}}
+    ctx = {"geo_folder": folder, "home": home_place or {},
+           "saved_wx": lambda p: forecasts.near(store, p["lat"], p["lon"])}   # the saved forecast, when the internet is down
     ai_on = aimod.summaries_on(store)
 
     def news_(rest, key):
-        return meshinfo.news(brief.latest(store), key, rest)
+        return meshinfo.news(mesh_brief_rec(), key, rest)
 
     def flight_lookup(rest, adult):
         key = flights.load_key(Path(store.path).parent)
@@ -3441,7 +3732,7 @@ def bot_context():
             return True
         return meshinfo.flight(ctx, rest, flights, fa_key=key, can_use_fa=can_use)
 
-    return {"ready": ready, "alerts_here": alerts, "flight_board": flight, "news": news_, "news_rec": brief.latest(store) or {},
+    return {"ready": ready, "alerts_here": alerts, "flight_board": flight, "news": news_, "news_rec": mesh_brief_rec() or {},
             "home": home,
             "alerts": lambda rest, adult: meshinfo.place_alerts(ctx, rest, situation.items(store)),
             "wx": lambda rest, adult: meshinfo.weather(ctx, rest),
@@ -3463,6 +3754,13 @@ def geo_refresh():
     folder = geo_folder()
     if places.needs_refresh(folder):
         places.refresh(folder)
+
+
+def mesh_brief_rec():
+    """The brief the mesh carries: the household one (no one's feedback), or the person an admin chose."""
+    rec = brief.latest(store)
+    who = mesh.settings(store)["brief_user"]
+    return brief.personalise(store, rec, who) if who and rec else rec
 
 
 def mesh_brief_tick(now_=None):
@@ -3500,14 +3798,15 @@ def mesh_brief_lines(local):
         try:
             props = wx.point(home_site["lat"], home_site["lon"])
             day = wx.days("", props, 1)
-            if day:
-                bits.append(day[0].split(" ", 1)[1] if day[0].startswith(("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun", "Tngt")) else day[0])
-        except Exception:
-            pass
+        except Exception:  # no internet: the saved forecast
+            snap = forecasts.near(store, home_site["lat"], home_site["lon"])
+            day = forecasts.days(snap, "", 1) if snap else []
+        if day:
+            bits.append(day[0].split(" ", 1)[1] if day[0].startswith(("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun", "Tngt")) else day[0])
     top = [i for i in situation.items(store) if i["tier"] in ("flash", "priority")]
     bits.append(f"{len(top)} alert{'s' if len(top) != 1 else ''}: {top[0]['title'][:40]}" if top else "No alerts near us")
     first = meshcore.fit(f"{head} " + ". ".join(bits) + ".", 120)
-    st = meshinfo.stories(brief.latest(store))[:3]
+    st = meshinfo.stories(mesh_brief_rec())[:3]
     if not st:
         return [first]
     news = "News: " + " ".join(f"{i + 1} {x['short']}." for i, x in enumerate(st)) + " NEWS # for more"
@@ -3548,7 +3847,7 @@ def setup_notifier():
 
     notifier = notify.Notifier(store, folder / "vapid.pem", enabled, mail=mail)
     for listeners in (checkins.listeners, situation.listeners, medical.listeners, audit.listeners, flights.listeners,
-                      renewals.listeners, comms.listeners, news.listeners, localwatch.listeners, selfupdate.listeners,
+                      renewals.listeners, comms.listeners, news.listeners, selfupdate.listeners,
                       hostcheck.listeners):
         if notifier not in listeners:
             listeners[:] = [l for l in listeners if not isinstance(l, notify.Notifier)] + [notifier]  # others (mesh) stay
@@ -3572,6 +3871,7 @@ def check_flights():
     if ROLE in ("pi", "laptop") or not flights.active(store) or not _flights_lock.acquire(blocking=False):
         return None
     try:
+        flights.HOME_TZ = BRIEF["tz"]
         return flights.check_all(store, key=flights.load_key(Path(store.path).parent))
     finally:
         _flights_lock.release()
@@ -3586,7 +3886,9 @@ def refresh_news(keys=None):
     if not _news_lock.acquire(blocking=False):
         return None
     try:
-        heads, _status = brief.fetch_all(keys)
+        off = news.outlets_off(store)   # outlets an admin turned off aren't fetched at all
+        heads, status = brief.fetch_all([k for k in (keys or list(brief.OUTLET)) if k not in off])
+        news.record_feed_status(store, status)
         places = localwatch.places(store)
         if places:  # each family town's own news search, every 10 minutes with the fast feeds
             local, st = localwatch.fetch_places(places)
@@ -3609,7 +3911,8 @@ def make_brief(force=False, now_=None):
         return None
     try:
         ai = aimod.summarizer(store) if BRIEF["ai"] else None
-        rec = brief.build(store, situation.items(store), use_ai=bool(ai), ai=ai)
+        rec = brief.build(store, situation.items(store), use_ai=bool(ai), ai=ai,
+                          keys=[k for k in brief.OUTLET if k not in news.outlets_off(store)])
         brief.save(store, rec, day)
         for fn in list(situation.listeners):
             if isinstance(fn, notify.Notifier):
@@ -3664,10 +3967,10 @@ def start_background():
     scheduler.every("mesh-brief", 120, mesh_brief_tick, first_delay=120)
     if ROLE not in ("pi", "laptop"):
         scheduler.every("situation", 600, refresh_situation, first_delay=40)
+        scheduler.every("forecasts", forecasts.EVERY, lambda: forecasts.save_all(store, store.sites()), first_delay=120)
         scheduler.every("brief", 600, make_brief, first_delay=90)
         scheduler.every("news", 3600, refresh_news, first_delay=150)
         scheduler.every("news-fast", 600, lambda: refresh_news(brief.FAST), first_delay=400)
-        scheduler.every("chatter", 600, lambda: localwatch.run(store, Path(store.path).parent), first_delay=460)
         scheduler.every("flights", flights.CHECK_EVERY, check_flights, first_delay=20)
         scheduler.every("partners", partners.PULL_EVERY, lambda: partners.pull_all(store, Path(store.path).parent), first_delay=120)
         scheduler.every("bunkr-version", 24 * 3600, lambda: selfupdate.check(store), first_delay=600)
@@ -3709,7 +4012,24 @@ def main():
                     help="hub: run the offline library reader (kiwix-serve) on 127.0.0.1:8080 unless one already answers there")
     ap.add_argument("--allow-host", action="append", default=[], metavar="NAME",
                     help="also accept requests for this hostname (repeatable)")
+    ap.add_argument("--demo", action="store_true",
+                    help="try BUNKR with a made-up family (in a temporary folder unless --db is given); "
+                         "it fetches nothing, sends nothing and never opens a radio")
     args = ap.parse_args()
+    global DEMO
+    DEMO = args.demo
+    if DEMO:
+        import tempfile
+        if not args.db:  # a throwaway folder, cleared when the demo stops
+            import atexit
+            import shutil
+            tmp = tempfile.mkdtemp(prefix="bunkr-demo-")
+            atexit.register(shutil.rmtree, tmp, True)
+            import signal
+            signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))  # a plain stop also clears it
+            args.db = str(Path(tmp) / "bunkr.db")
+        args.kiwix, args.no_brief, args.no_brief_ai, args.role = "off", True, True, "standalone"
+        print(f"Demo: a made-up family in {args.db}. Nothing in it is real.")
     ALLOWED_HOSTS.update(h.strip().lower() for h in args.allow_host if h.strip())
     global REQUIRE_LOGIN, ROLE, HUB_URL
     REQUIRE_LOGIN, ROLE, HUB_URL = args.require_login, args.role, args.hub_url
@@ -3738,7 +4058,10 @@ def main():
         if LOCK["on"]:
             print("Node lock: waiting for the key from the hub; until then the database is not locked.")
     depot = Depot(store, Path(args.store) if args.store else Path(db_path).parent / "store")
-    if store is not None:
+    if DEMO:
+        from . import demo
+        demo.fill(store)
+    if store is not None and not DEMO:
         setup_notifier()
         setup_mesh()
     depot.ensure()
@@ -3757,7 +4080,8 @@ def main():
         atexit.register(KIWIX["manager"].stop)  # don't leave kiwix-serve running when BUNKR stops
         signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
         threading.Thread(target=kiwix_watch, daemon=True, name="kiwix-start").start()
-    start_background()
+    if not DEMO:
+        start_background()
     httpd = ThreadingHTTPServer((args.bind, args.port), Handler)
     url = f"http://127.0.0.1:{args.port}/"
     print(f"BUNKR running at {url}  (Ctrl+C to stop)")

@@ -1088,10 +1088,63 @@ def _migrate_34(conn):
     );
     """)
 
-MIGRATIONS = [_migrate_1, _migrate_2, _migrate_3, _migrate_4, _migrate_5, _migrate_6, _migrate_7, _migrate_8, _migrate_9,
+def _migrate_35(conn):
+    """A home weather station's readings (bunkr/station.py): one row a minute at most, a week kept."""
+    conn.execute("CREATE TABLE IF NOT EXISTS station_readings (at TEXT PRIMARY KEY, data TEXT NOT NULL)")
+
+
+def _migrate_36(conn):
+    """Where each radio is kept: one of the household's locations (the hall closet, the truck, a go-bag)."""
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(radios)")}
+    if "location_id" not in cols:
+        conn.execute("ALTER TABLE radios ADD COLUMN location_id INTEGER REFERENCES locations(id) ON DELETE SET NULL")
+
+
+def _migrate_37(conn):
+    """Brief stories a person is done with ("Done with this" / "Not for me" in the daily brief): one row per source link."""
+    conn.execute("CREATE TABLE IF NOT EXISTS brief_done (user_id INTEGER NOT NULL, url TEXT NOT NULL, at TEXT NOT NULL, "
+                 "PRIMARY KEY (user_id, url))")
+
+
+def _migrate_38(conn):
+    """The phone app (bunkr/phone.py): one-time pairing codes, a key for each paired phone (only its hash is kept),
+    the short backlog the notification stream replays after a reconnect, and how exact a check-in's location was."""
+    conn.executescript("""
+    CREATE TABLE IF NOT EXISTS phone_codes (
+        user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+        code_hash TEXT NOT NULL,
+        expires_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS phone_keys (
+        id INTEGER PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        key_hash TEXT NOT NULL UNIQUE,
+        name TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        last_seen TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS app_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        at TEXT NOT NULL,
+        event TEXT NOT NULL DEFAULT '',
+        tier TEXT NOT NULL DEFAULT '',
+        title TEXT NOT NULL DEFAULT '',
+        body TEXT NOT NULL DEFAULT '',
+        tag TEXT NOT NULL DEFAULT '',
+        url TEXT NOT NULL DEFAULT ''
+    );
+    CREATE INDEX IF NOT EXISTS app_events_user ON app_events(user_id, id);
+    """)
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(checkins)")}
+    if "accuracy" not in cols:
+        conn.execute("ALTER TABLE checkins ADD COLUMN accuracy REAL")   # metres, from the phone's GPS
+
+
+MIGRATIONS = [_migrate_1,_migrate_2, _migrate_3, _migrate_4, _migrate_5, _migrate_6, _migrate_7, _migrate_8, _migrate_9,
               _migrate_10, _migrate_11, _migrate_12, _migrate_13, _migrate_14, _migrate_15, _migrate_16, _migrate_17, _migrate_18, _migrate_19, _migrate_20,
               _migrate_21, _migrate_22, _migrate_23, _migrate_24, _migrate_25, _migrate_26, _migrate_27, _migrate_28, _migrate_29, _migrate_30, _migrate_31, _migrate_32,
-              _migrate_33, _migrate_34]
+              _migrate_33, _migrate_34, _migrate_35, _migrate_36, _migrate_37, _migrate_38]
 SCHEMA_VERSION = len(MIGRATIONS)
 
 ITEM_FIELDS = ("name", "category", "quantity", "unit", "pack_size", "pack_unit", "per_unit", "size_unit",

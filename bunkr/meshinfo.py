@@ -129,14 +129,25 @@ def weather(ctx, rest, get=None):
     p, err = resolve(ctx, rest)
     if err:
         return [err]
+    label = p["label"] if p["kind"] != "node" else "Your node"
     try:
         props = wx.point(p["lat"], p["lon"], get)
+        if not n:
+            return [meshfit(wx.now_and_next(label, props, get))]
+        rows = wx.days(label, props, min(n, 7), get)
     except LookupError as exc:
         return [str(exc)]
-    label = p["label"] if p["kind"] != "node" else "Your node"
-    if not n:
-        return [meshfit(wx.now_and_next(label, props, get))]
-    rows = wx.days(label, props, min(n, 7), get)
+    except Exception:  # no internet: the forecast the hub saved, if it has one near there
+        from . import forecasts
+        snap = (ctx.get("saved_wx") or (lambda _p: None))(p)
+        if not snap:
+            return ["Can't reach the weather service, and there's no saved forecast for there."]
+        if not n:
+            line = forecasts.now_and_next(snap, label)
+            return [meshfit(line or f"{label}: the saved forecast has run out ({forecasts.age(snap)}).")]
+        rows = forecasts.days(snap, label, min(n, 7))
+        head = f"{label} {len(rows)}d, saved {forecasts.age(snap)}"
+        return pack([head] + rows, sep=". ", max_msgs=4) if rows else [f"{label}: the saved forecast has run out."]
     head = f"{label} {min(n, 7)}d" + (" (NWS gives 7)" if n > 7 else "")
     return pack([head] + rows, sep=". ", max_msgs=4)
 

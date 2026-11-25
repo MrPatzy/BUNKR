@@ -46,8 +46,9 @@ class TagTests(unittest.TestCase):
         self.assertEqual(news.tag(["US Fed holds rates"])["area"], "us")
 
     def test_prefs_are_cleaned(self):
-        self.assertEqual(news.clean_prefs({"areas": ["colorado", "mars", "colorado"], "muted_topics": ["politics", "x"]}),
-                         {"areas": ["colorado"], "muted_topics": ["politics"], "watch": []})
+        self.assertEqual(news.clean_prefs({"areas": ["colorado", "mars", "colorado"], "muted_topics": ["politics", "x"],
+                                           "muted_outlets": ["rt", "nope", "rt"]}),
+                         {"areas": ["colorado"], "muted_topics": ["politics"], "muted_outlets": ["rt"], "watch": []})
         self.assertEqual(news.clean_prefs(None)["areas"], [a for a, _ in news.AREAS])
 
 
@@ -62,6 +63,52 @@ class FeedTests(unittest.TestCase):
 
     def stories(self, uid=1, **kw):
         return news.feed(self.st, uid, **kw)["stories"]
+
+    def test_notification_title_and_detail(self):
+        self.assertEqual(news.short_title("Short one"), "Short one")
+        long = "US flight disruptions: Chicago's O'Hare airport issues brief ground stop amid staffing shortage"
+        t = news.short_title(long)
+        self.assertTrue(len(t) <= news.TITLE_MAX and t.endswith("…") and long.startswith(t[:-1]))
+        items = [{"title": "Lagos power grid collapses again", "summary": "Unrelated: football results from the weekend in Spain."},
+                 {"title": "Chicago O'Hare ground stop after staffing shortage",
+                  "summary": "CHICAGO (AP) -- Flights were held at O'Hare for an hour on Monday. Delays ran into the evening. Sign up for our newsletter"},
+                 {"title": "O'Hare ground stop", "summary": "O'Hare ground stop - Fox News"}]
+        d = news.detail(items, "Chicago O'Hare ground stop after staffing shortage")
+        self.assertEqual(d, "Flights were held at O'Hare for an hour on Monday. Delays ran into the evening.")
+        self.assertEqual(news.detail([], "Just the headline"), "Just the headline")
+
+    def test_feed_health(self):
+        t0 = datetime(2026, 11, 20, 12, tzinfo=timezone.utc)
+        news.record_feed_status(self.st, {"ap": {"ok": True, "count": 12}, "rt": {"ok": False, "error": "timed out"}}, t0)
+        st = self.st.get_raw("news_feed_status")
+        self.assertEqual(news.feed_health(st["ap"], t0 + timedelta(hours=5)), "")
+        self.assertEqual(news.feed_health(st["rt"], t0 + timedelta(hours=5)), "")          # one bad hour isn't news
+        self.assertTrue(news.feed_health(st["rt"], t0 + timedelta(days=2)).startswith("not answering"))
+        news.record_feed_status(self.st, {"ap": {"ok": True, "count": 0}}, t0 + timedelta(days=4))
+        self.assertEqual(news.feed_health(self.st.get_raw("news_feed_status")["ap"], t0 + timedelta(days=4)), "nothing new for 4 days")
+        news.set_outlets_off(self.st, ["ap"])                                               # off: no warning
+        self.assertEqual({o["key"]: o for o in news.sources(self.st, None)}["ap"]["health"], "")
+
+    def test_hidden_and_turned_off_outlets(self):
+        from bunkr import auth
+        me, other = (auth.create_user(self.st, n, "a-long-password-1", "family") or auth.user_by_name(self.st, n)["id"] for n in ("me", "other"))
+        kyiv = lambda uid=me: [s for s in self.stories(uid) if s["place"] == "Ukraine"][0]
+        # one person hides TASS: the Kyiv story stays (others reported it), counting the outlets still shown
+        news.save_prefs(self.st, me, news.prefs(self.st, me) | {"muted_outlets": ["tass"]})
+        self.assertEqual(kyiv()["outlets"], 2)
+        self.assertNotIn("tass", [i["outlet"] for i in kyiv()["items"]])
+        self.assertEqual(kyiv(other)["outlets"], 3)                  # someone else's feed is unchanged
+        # a story only hidden outlets reported goes from that person's feed
+        self.assertTrue([s for s in self.stories(me, area="colorado") if "Boulder" in s["headline"]])
+        news.save_prefs(self.st, me, news.prefs(self.st, me) | {"muted_outlets": ["tass", "cpr", "coloradosun"]})
+        self.assertFalse([s for s in self.stories(me, area="colorado") if "Boulder" in s["headline"]])
+        # an admin turns an outlet off for everyone
+        self.assertEqual(news.set_outlets_off(self.st, ["reuters", "nope"]), ["reuters"])
+        self.assertEqual(kyiv(other)["outlets"], 2)
+        src = {o["key"]: o for o in news.sources(self.st, me)}
+        self.assertFalse(src["reuters"]["fetched"])
+        self.assertTrue(src["tass"]["hidden"])
+        self.assertNotIn("feed", src["tass"])
 
     def test_headlines_group_into_stable_stories(self):
         self.assertEqual(self.r["stories"], 5)

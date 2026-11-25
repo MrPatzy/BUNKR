@@ -16,3 +16,5 @@ __pycache__/
 *.pyc
 .cache/
 pr-body.md
+# Build agents' scratch: screen-check flows (/opt/bunkr-verify/ui.sh --steps) stay out of commits
+verify/

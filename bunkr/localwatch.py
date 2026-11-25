@@ -1,40 +1,22 @@
 """Keeping pace with what's happening where the family is: the towns on the Sites tab, watched closely.
 
-Three layers, from most to least trustworthy:
-1. Local news. Denver TV and papers are regular outlets (brief.OUTLETS). On top of that, every 10 minutes BUNKR asks
-   Google News for each family town ("Nederland, CO"), so a boil-water notice that only local TV reports still arrives.
-   A story there that says hack, outage, boil, evacuate and the like is raised as "Near Jordan (Nederland)".
-2. Unconfirmed: what people are posting. Bluesky's public search (no account needed) and, once an admin adds a
-   free Reddit app key, chosen subreddits. Only posts that name a family town (or are in that town's subreddit)
-   AND mention an alarm word are kept. These are shown apart from news, labelled "Unconfirmed".
-3. A heads-up from posts alone needs two different people posting about the same town and the same thing within a
-   few hours. When a news outlet then reports it, the posts are marked "now reported by ...".
+Denver TV and papers are regular outlets (brief.OUTLETS). On top of that, every 10 minutes BUNKR asks Google News for
+each family town ("Nederland, CO"), so a boil-water notice that only local TV reports still arrives. A story there that
+says hack, outage, boil, evacuate and the like is raised as "Near Jordan (Nederland)".
 
-Nothing here posts anything anywhere; it only reads public posts. The Reddit secret is a file next to the database
-(`reddit.key`, mode 600), never in the database or the API.
+Until 1.3 this also read public posts (Bluesky, and Reddit with an app key) into an "Unconfirmed" view. Reddit closed
+its API to new apps and blocks its public feeds, and the rest found almost nothing local, so that part is gone.
 """
 
-import base64
-import json
 import re
-import threading
-import time
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
-from . import brief, news
+from . import brief
 
-USER_AGENT = "linux:bunkr-family-watch:0.3 (self-hosted family preparedness app)"
-SECRET_FILE = "reddit.key"
-DEFAULTS = {"extra_places": [], "subreddits": ["Denver", "Colorado"], "bluesky": True, "reddit_id": ""}
-CHATTER_HOURS = 3        # posts this recent count towards a heads-up
-KEEP_DAYS = 3
+DEFAULTS = {"extra_places": []}
 MAX_PLACES = 12
-listeners = []
-_token = {"value": "", "until": 0.0}
-_lock = threading.Lock()
 STATES = {"AL": "Alabama", "AK": "Alaska", "AZ": "Arizona", "AR": "Arkansas", "CA": "California", "CO": "Colorado",
           "CT": "Connecticut", "DE": "Delaware", "FL": "Florida", "GA": "Georgia", "HI": "Hawaii", "ID": "Idaho", "IL": "Illinois",
           "IN": "Indiana", "IA": "Iowa", "KS": "Kansas", "KY": "Kentucky", "LA": "Louisiana", "ME": "Maine", "MD": "Maryland",
@@ -50,20 +32,11 @@ def _now():
     return datetime.now(timezone.utc)
 
 
-def _iso(dt):
-    return dt.astimezone(timezone.utc).isoformat(timespec="seconds")
-
-
 # ---------- settings ----------
 def settings(store):
     s = dict(DEFAULTS)
     s.update({k: v for k, v in (store.get_raw("localwatch", {}) or {}).items() if k in DEFAULTS})
     return s
-
-
-def has_secret(folder):
-    p = Path(folder) / SECRET_FILE
-    return p.exists() and p.stat().st_size > 0
 
 
 def _lines(v, n, size, sep=r"[\n,]"):
@@ -72,42 +45,16 @@ def _lines(v, n, size, sep=r"[\n,]"):
     return list(dict.fromkeys(" ".join(str(x).split())[:size] for x in (v or []) if str(x).strip()))[:n]
 
 
-def save_settings(store, folder, data):
+def save_settings(store, data):
     s = settings(store)
     if "extra_places" in data:
         s["extra_places"] = _lines(data["extra_places"], MAX_PLACES, 60, sep=r"\n")  # "Conifer, CO" is one place
-    if "subreddits" in data:
-        subs = [x.strip().removeprefix("r/").removeprefix("/r/") for x in _lines(data["subreddits"], 15, 30)]
-        bad = [x for x in subs if not re.fullmatch(r"[A-Za-z0-9_]{2,21}", x)]
-        if bad:
-            raise ValueError(f"not a subreddit name: {bad[0]}")
-        s["subreddits"] = subs
-    if "bluesky" in data:
-        s["bluesky"] = bool(data["bluesky"])
-    if "reddit_id" in data:
-        rid = str(data["reddit_id"] or "").strip()
-        if rid and not re.fullmatch(r"[A-Za-z0-9_\-]{10,40}", rid):
-            raise ValueError("that doesn't look like a Reddit app id (the short code under the app's name)")
-        s["reddit_id"] = rid
     store.set_raw("localwatch", s)
-    path = Path(folder) / SECRET_FILE
-    if data.get("forget_secret"):
-        path.unlink(missing_ok=True)
-    elif data.get("reddit_secret"):
-        sec = str(data["reddit_secret"]).strip()
-        if not re.fullmatch(r"[A-Za-z0-9_\-]{20,60}", sec):
-            raise ValueError("that doesn't look like a Reddit app secret")
-        path.touch(mode=0o600)
-        path.chmod(0o600)
-        path.write_text(sec + "\n")
-    _token.update(value="", until=0.0)
-    return view(store, folder)
+    return view(store)
 
 
-def view(store, folder):
-    s = settings(store)
-    return s | {"places": places(store), "reddit_ready": bool(s["reddit_id"] and has_secret(folder)), "has_secret": has_secret(folder),
-                "status": store.get_raw("localwatch_status", {}) or {}}
+def view(store):
+    return settings(store) | {"places": places(store)}
 
 
 # ---------- the family's places ----------
@@ -196,192 +143,3 @@ def fetch_places(plist, opener=None):
         except Exception as exc:
             status[p["name"]] = {"ok": False, "error": f"{type(exc).__name__}: {exc}"[:160]}
     return heads, status
-
-
-# ---------- layer 2: what people are posting (unconfirmed) ----------
-CONCEPTS = [("a water problem (boil or don't drink)", r"boil|drink|water main|contaminat"), ("power outage", r"blackout|power cut|outage|offline|shut ?down"),
-            ("hack", r"hack|breach|cyber|ransomware"), ("evacuation", r"evacuat|shelter in place"), ("fire", r"wildfire|explosion"),
-            ("gas leak", r"gas leak|chemical"), ("shooting", r"shooter|lockdown"), ("recall", r"recall"), ("derailment", r"derail")]
-
-
-def _alarm(text):
-    """The kind of trouble a text is about, so "unless boiled" and "boil water notice" count as the same thing."""
-    m = news.ALARM_RE.search(text or "")
-    if not m:
-        return ""
-    w = m.group(0).lower()
-    return next((name for name, rx in CONCEPTS if re.search(rx, w)), w)
-
-
-def _get_json(url, headers, opener=None, data=None):
-    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": "application/json", **headers}, data=data)
-    with (opener or urllib.request.build_opener()).open(req, timeout=20) as r:
-        return json.loads(r.read(3_000_000))
-
-
-def bluesky(plist, opener=None, when=None):
-    """Recent public Bluesky posts naming a family town with an alarm word."""
-    when = when or _now()
-    out = []
-    for p in plist:
-        q = urllib.parse.urlencode({"q": p["name"], "sort": "latest", "limit": 50, "since": _iso(when - timedelta(hours=CHATTER_HOURS))})
-        d = _get_json("https://api.bsky.app/xrpc/app.bsky.feed.searchPosts?" + q, {}, opener)
-        for post in d.get("posts") or []:
-            rec, author = post.get("record") or {}, post.get("author") or {}
-            text = str(rec.get("text") or "")
-            alarm = _alarm(text)
-            if not alarm or not place_re(p).search(text) or not local_re(p).search(text):
-                continue
-            rkey = str(post.get("uri") or "").rsplit("/", 1)[-1]
-            out.append({"source": "bluesky", "channel": "", "place": p["name"], "author": str(author.get("handle") or "")[:80],
-                        "text": text[:500], "url": f"https://bsky.app/profile/{author.get('handle')}/post/{rkey}",
-                        "at": str(rec.get("createdAt") or "")[:25], "alarm": alarm})
-    return out
-
-
-def _reddit_token(store, folder, opener=None):
-    with _lock:
-        if _token["value"] and time.time() < _token["until"]:
-            return _token["value"]
-        s = settings(store)
-        secret = (Path(folder) / SECRET_FILE).read_text().strip() if has_secret(folder) else ""
-        if not (s["reddit_id"] and secret):
-            return ""
-        auth = base64.b64encode(f"{s['reddit_id']}:{secret}".encode()).decode()
-        d = _get_json("https://www.reddit.com/api/v1/access_token", {"Authorization": "Basic " + auth,
-                      "Content-Type": "application/x-www-form-urlencoded"}, opener, data=b"grant_type=client_credentials")
-        if not d.get("access_token"):
-            raise RuntimeError(d.get("error") or "Reddit didn't give a token")
-        _token.update(value=d["access_token"], until=time.time() + int(d.get("expires_in") or 3600) - 120)
-        return _token["value"]
-
-
-def reddit(store, folder, plist, opener=None, when=None):
-    """New posts in the chosen subreddits naming a family town (or in that town's own subreddit) with an alarm word."""
-    tok = _reddit_token(store, folder, opener)
-    subs = settings(store)["subreddits"]
-    if not tok or not subs:
-        return []
-    when = when or _now()
-    d = _get_json(f"https://oauth.reddit.com/r/{'+'.join(subs)}/new?limit=100&raw_json=1", {"Authorization": "Bearer " + tok}, opener)
-    out = []
-    for c in (d.get("data") or {}).get("children") or []:
-        x = c.get("data") or {}
-        at = datetime.fromtimestamp(float(x.get("created_utc") or 0), timezone.utc)
-        if at < when - timedelta(hours=CHATTER_HOURS * 4):
-            continue
-        text = f"{x.get('title') or ''}\n{x.get('selftext') or ''}"
-        alarm = _alarm(text)
-        if not alarm:
-            continue
-        sub = str(x.get("subreddit") or "")
-        # the town's own subreddit, or a regional one where the post is clearly about the town
-        p = next((p for p in plist if p["name"].replace(" ", "").lower() in sub.lower()
-                  or (place_re(p).search(text) and local_re(p).search(f"{text} r/{sub}"))), None)
-        if not p:
-            continue
-        out.append({"source": "reddit", "channel": "r/" + sub, "place": p["name"], "author": str(x.get("author") or "")[:80],
-                    "text": text.strip()[:500], "url": "https://www.reddit.com" + str(x.get("permalink") or ""), "at": _iso(at), "alarm": alarm})
-    return out
-
-
-def save_chatter(store, posts):
-    stamp, n = _iso(_now()), 0
-    for c in posts:
-        if not c.get("url"):
-            continue
-        if store._rows("SELECT 1 FROM chatter WHERE url=?", (c["url"],)):
-            continue
-        store._exec("INSERT INTO chatter(source, channel, place, author, text, url, at, fetched_at, alarm) VALUES(?,?,?,?,?,?,?,?,?)",
-                    (c["source"], c["channel"], c["place"], c["author"], c["text"], c["url"], c["at"] or stamp, stamp, c["alarm"]))
-        n += 1
-    store._exec("DELETE FROM chatter WHERE fetched_at < ?", (_iso(_now() - timedelta(days=KEEP_DAYS)),))
-    return n
-
-
-def confirm(store, when=None):
-    """Posts a news outlet has since reported: link them to the story."""
-    when = when or _now()
-    open_ = store._rows("SELECT * FROM chatter WHERE story='' AND fetched_at >= ?", (_iso(when - timedelta(hours=24)),))
-    if not open_:
-        return 0
-    stories = store._rows("SELECT id, headline FROM news_stories WHERE last_at >= ?", (_iso(when - timedelta(hours=36)),))
-    n = 0
-    for c in open_:
-        rx = re.compile(r"(?<![\w])" + re.escape(c["place"]) + r"(?![\w])", re.I)
-        for s in stories:
-            text = " ".join(i["title"] + " " + i["summary"] for i in store._rows("SELECT title, summary FROM news_items WHERE story=?", (s["id"],)))
-            if rx.search(text) and _alarm(text) == c["alarm"]:
-                store._exec("UPDATE chatter SET story=? WHERE id=?", (s["id"], c["id"]))
-                n += 1
-                break
-    return n
-
-
-def corroborate(store, plist, when=None):
-    """Two different people posting about the same town and the same thing within a few hours, not yet in the news:
-    a heads-up to everyone's bell, once a day per town and thing."""
-    when = when or _now()
-    who = {p["name"].lower(): p["label"] for p in plist}
-    rows = store._rows("SELECT * FROM chatter WHERE at >= ? ORDER BY at", (_iso(when - timedelta(hours=CHATTER_HOURS)),))
-    groups = {}
-    for c in rows:
-        groups.setdefault((c["place"].lower(), c["alarm"]), []).append(c)
-    raised = 0
-    for (place, alarm), posts in groups.items():
-        authors = {(c["source"], c["author"].lower()) for c in posts}
-        if len(authors) < 2 or any(c["story"] for c in posts):
-            continue
-        if not news._once(store, f"chatter:{place}:{alarm}:{when.date().isoformat()}"):
-            continue
-        where = sorted({c["channel"] or "Bluesky" for c in posts})
-        label = who.get(place, posts[0]["place"])
-        for fn in list(listeners):
-            try:
-                fn("news", {"title": f"Unconfirmed, near {label}: people are posting about {posts[-1]['alarm']}",
-                            "body": f"{len(authors)} people on {', '.join(where)} in the last {CHATTER_HOURS} hours. No news outlet has "
-                                    "reported it yet: treat it as a heads-up, not a fact.",
-                            "tag": f"chatter-{place}-{alarm}", "url": "/#brief", "user_ids": None, "family": True})
-            except Exception:
-                pass
-        raised += 1
-    return raised
-
-
-def recent(store, limit=60):
-    rows = store._rows("SELECT c.*, COALESCE(s.headline, '') AS story_headline FROM chatter c LEFT JOIN news_stories s ON s.id = c.story "
-                       "ORDER BY c.at DESC LIMIT ?", (limit,))
-    for r in rows:
-        if r["story"]:
-            first = store._rows("SELECT outlet, summary FROM news_items WHERE story=? ORDER BY at LIMIT 1", (r["story"],))
-            o = first[0] if first else {"outlet": "", "summary": ""}
-            r["reported_by"] = (o["summary"].removeprefix("Reported by ").rstrip(".") if o["outlet"] == "local" and o["summary"]
-                                else brief.OUTLET.get(o["outlet"], {}).get("name", o["outlet"]))
-    return rows
-
-
-def run(store, folder, opener=None, when=None):
-    """Every 10 minutes on the hub: fetch posts, link ones the news has reported, raise corroborated ones."""
-    plist = places(store)
-    status = {}
-    posts = []
-    if plist and settings(store)["bluesky"]:
-        try:
-            got = bluesky(plist, opener, when)
-            posts += got
-            status["bluesky"] = {"ok": True, "count": len(got), "at": _iso(_now())}
-        except Exception as exc:
-            status["bluesky"] = {"ok": False, "error": f"{type(exc).__name__}: {exc}"[:160], "at": _iso(_now())}
-    if plist and settings(store)["reddit_id"] and has_secret(folder):
-        try:
-            got = reddit(store, folder, plist, opener, when)
-            posts += got
-            status["reddit"] = {"ok": True, "count": len(got), "at": _iso(_now())}
-        except Exception as exc:
-            _token.update(value="", until=0.0)
-            status["reddit"] = {"ok": False, "error": f"{type(exc).__name__}: {exc}"[:160], "at": _iso(_now())}
-    new = save_chatter(store, posts)
-    confirm(store, when)
-    raised = corroborate(store, plist, when)
-    store.set_raw("localwatch_status", status | {"places": len(plist)})
-    return {"new": new, "raised": raised, "status": status}

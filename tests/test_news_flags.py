@@ -129,7 +129,9 @@ class EarlyWarningTests(Base):
         r = news.refresh(self.st, [hack, far, old])
         self.assertEqual(r["raised"], 1)
         ev, d = self.heard[0]
-        self.assertEqual((ev, d["title"], d["user_ids"]), ("news", hack["title"], None))
+        self.assertEqual((ev, d["title"], d["user_ids"]), ("news", news.short_title(hack["title"]), None))
+        self.assertTrue(len(d["title"]) <= news.TITLE_MAX and d["title"].endswith("…"))   # short enough for a phone
+        self.assertIn(hack["title"], d["body"])          # no description from the outlet: the full headline goes below
         self.assertIn("First from Nextgov/FCW", d["body"])
         s = [x for x in news.feed(self.st, 1)["stories"] if x["headline"] == hack["title"]][0]
         self.assertEqual(s["alarm"], "breach")
@@ -253,6 +255,11 @@ class MatchingTests(Base):
         self.assertTrue(pairs and "ukrain" in pairs[0][0] | pairs[0][1] and "israel" in pairs[0][0] | pairs[0][1])
         self.assertTrue(news._kept_apart({"israel", "car"}, {"ukrain", "missil"}, pairs))
         self.assertFalse(news._kept_apart({"israel", "ukrain"}, {"ukrain"}, pairs))   # both sides named: no block
+        # clear: off the list, the lesson stays
+        self.assertFalse([f for f in news.flags(self.st)["flags"] if f["id"] == fid][0]["cleared"])
+        news.review(self.st, fid, "clear", ADMIN)
+        self.assertTrue([f for f in news.flags(self.st)["flags"] if f["id"] == fid][0]["cleared"])
+        self.assertEqual(news.apart_pairs(self.st), pairs)
         # undo: the lesson is forgotten and the source goes back
         news.review(self.st, fid, "undo", ADMIN)
         self.assertEqual(news.apart_pairs(self.st), [])

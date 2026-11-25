@@ -52,6 +52,9 @@ def _catalog():
                                     r"(^|/)device-(install|update)\.(sh|bat)$"],
                     "label": f"Meshtastic: {info['label']}"})
     out += [
+        # BUNKR's own Android app (android/, built and signed by .github/workflows/android.yml). The tag is app-v<build number>.
+        {"kind": "app", "id": "bunkr-android", "repo": "MrPatzy/BUNKR", "tag_prefix": "app-v",
+         "assets": [r"^bunkr-\d+\.apk$"], "label": "BUNKR for Android (this hub's own app)"},
         {"kind": "app", "id": "meshtastic-android", "repo": "meshtastic/Meshtastic-Android",
          "assets": [r"^androidApp-fdroid-universal-release\.apk$"], "label": "Meshtastic for Android (APK)"},
         {"kind": "app", "id": "organic-maps-android", "repo": "organicmaps/organicmaps", "tag_suffix": "-android",
@@ -109,7 +112,10 @@ def resolve_all(releases_cache=None):
     """Catalog entries with their latest release (or an error when offline)."""
     cache = {} if releases_cache is None else releases_cache
     out = []
+    from . import features
     for e in CATALOG:
+        if e["id"] == "bunkr-android" and not features.enabled("phone_app"):
+            continue   # held back with the phone app (bunkr/features.py)
         item = {**e, "online": False, "latest": "", "size": 0}
         try:
             rel = library._cached(("release", e["id"]), lambda e=e: latest(e, cache))

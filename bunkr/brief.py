@@ -39,7 +39,7 @@ OUTLETS = [
     ("meduza", "Meduza", "Russia (exile)", "Russia", "independent, in exile", "https://meduza.io/rss/en/all"),
     ("moscowtimes", "The Moscow Times", "Russia (exile)", "Russia", "independent, in exile", "https://www.themoscowtimes.com/rss/news"),
     ("cgtn", "CGTN", "China", "China", "state-run", "https://www.cgtn.com/subscribe/rss/section/world.xml"),
-    ("globaltimes", "Global Times", "China", "China", "state-run", "https://www.globaltimes.cn/rss/outbrain.xml"),
+    ("globaltimes", "Global Times", "China", "China", "state-run", ""),  # its feed stopped 2026-10-09; kept so old stories keep its name
     ("ecns", "China News Service", "China", "China", "state-run", "https://www.ecns.cn/rss/rss.xml"),
     ("scmp", "South China Morning Post", "Hong Kong", "China", "private (Alibaba)", "https://www.scmp.com/rss/91/feed"),
     ("japantimes", "The Japan Times", "Japan", "Japan", "private", "https://www.japantimes.co.jp/feed/"),
@@ -78,6 +78,49 @@ OUTLETS = [
     ("bleeping", "BleepingComputer", "US", "Cyber and government tech", "private", "https://www.bleepingcomputer.com/feed/"),
     ("dtn", "DTN Progressive Farmer", "US", "Agriculture", "private", GN + "site:dtnpf.com+when:1d"),
     ("agripulse", "Agri-Pulse", "US", "Agriculture", "private", GN + "site:agri-pulse.com+when:1d"),
+    # added 2026-11-23 after a fetch check from the hub (tools/check_feeds.py)
+    ("nyt", "The New York Times", "US", "US and UK press", "private", "https://rss.nytimes.com/services/xml/rss/nyt/World.xml"),
+    ("nyt_us", "The New York Times (US)", "US", "US national news", "private", "https://rss.nytimes.com/services/xml/rss/nyt/US.xml"),
+    ("wapo", "The Washington Post", "US", "US and UK press", "private", "https://feeds.washingtonpost.com/rss/world"),
+    ("wapo_us", "The Washington Post (national)", "US", "US national news", "private", "https://feeds.washingtonpost.com/rss/national"),
+    ("thehill", "The Hill", "US", "US national news", "private", "https://thehill.com/news/feed/"),
+    ("politico", "Politico", "US", "US national news", "private", "https://rss.politico.com/politics-news.xml"),
+    ("axios", "Axios", "US", "US national news", "private", "https://api.axios.com/feed/"),
+    ("cnbc", "CNBC", "US", "US national news", "private", "https://www.cnbc.com/id/100727362/device/rss/rss.html"),
+    ("nypost", "New York Post", "US", "US national news", "private", "https://nypost.com/feed/"),
+    ("newsmax", "Newsmax", "US", "US national news", "private", "https://www.newsmax.com/rss/Newsfront/16/"),
+    ("washexaminer", "Washington Examiner", "US", "US national news", "private", "https://www.washingtonexaminer.com/feed"),
+    ("csmonitor", "The Christian Science Monitor", "US", "US national news", "private", "https://rss.csmonitor.com/feeds/all"),
+    ("latimes", "Los Angeles Times", "US", "US national news", "private", "https://www.latimes.com/world-nation/rss2.0.xml"),
+    ("upi", "UPI", "US", "Wire services", "private", "https://rss.upi.com/news/top_news.rss"),
+    ("cbsworld", "CBS News (world)", "US", "US and UK press", "private", "https://www.cbsnews.com/latest/rss/world"),
+    ("euronews", "Euronews", "France", "Europe", "private", "https://www.euronews.com/rss"),
+    ("skynews", "Sky News", "UK", "US and UK press", "private", "https://feeds.skynews.com/feeds/rss/world.xml"),
+    ("telegraph", "The Telegraph", "UK", "US and UK press", "private", "https://www.telegraph.co.uk/rss.xml"),
+    ("lemonde", "Le Monde (English)", "France", "Europe", "private", "https://www.lemonde.fr/en/rss/une.xml"),
+    ("politicoeu", "Politico Europe", "Belgium", "Europe", "private", "https://www.politico.eu/feed/"),
+    ("rte", "RTÉ News", "Ireland", "Europe", "public", "https://www.rte.ie/feeds/rss/?index=/news/"),
+    ("ansa", "ANSA (English)", "Italy", "Europe", "cooperative", "https://www.ansa.it/english/english_rss.xml"),
+    ("notesfrompoland", "Notes from Poland", "Poland", "Europe", "independent", "https://notesfrompoland.com/feed/"),
+    ("pravdaua", "Ukrainska Pravda", "Ukraine", "Ukraine", "private", "https://www.pravda.com.ua/eng/rss/"),
+    ("cbc", "CBC News", "Canada", "Canada", "public", "https://www.cbc.ca/webfeed/rss/rss-world"),
+    ("cbc_ca", "CBC News (Canada)", "Canada", "Canada", "public", "https://www.cbc.ca/webfeed/rss/rss-canada"),
+    ("globalnews", "Global News", "Canada", "Canada", "private", "https://globalnews.ca/world/feed/"),
+    ("abcau", "ABC News (Australia)", "Australia", "Oceania", "public", "https://www.abc.net.au/news/feed/2942460/rss.xml"),
+    ("rnz", "RNZ", "New Zealand", "Oceania", "public", "https://www.rnz.co.nz/rss/world.xml"),
+    ("toi", "The Times of India", "India", "South Asia", "private", "https://timesofindia.indiatimes.com/rssfeeds/296589292.cms"),
+    ("ndtv", "NDTV", "India", "South Asia", "private", "https://feeds.feedburner.com/ndtvnews-world-news"),
+    ("mee", "Middle East Eye", "UK", "Middle East", "private", "https://www.middleeasteye.net/rss"),
+    ("koreaherald", "The Korea Herald", "South Korea", "Korea and Southeast Asia", "private", "https://www.koreaherald.com/rss/newsAll"),
+    ("taipeitimes", "Taipei Times", "Taiwan", "Korea and Southeast Asia", "private", "https://www.taipeitimes.com/xml/index.rss"),
+    ("bangkokpost", "Bangkok Post", "Thailand", "Korea and Southeast Asia", "private", "https://www.bangkokpost.com/rss/data/topstories.xml"),
+    ("inquirer", "Philippine Daily Inquirer", "Philippines", "Korea and Southeast Asia", "private", "https://newsinfo.inquirer.net/feed"),
+    ("bbcafrica", "BBC (Africa)", "UK", "Africa", "public", "https://feeds.bbci.co.uk/news/world/africa/rss.xml"),
+    ("premiumtimes", "Premium Times", "Nigeria", "Africa", "private", "https://www.premiumtimesng.com/feed"),
+    ("batimes", "Buenos Aires Times", "Argentina", "Latin America", "private", "https://www.batimes.com.ar/feed"),
+    ("mexiconews", "Mexico News Daily", "Mexico", "Latin America", "private", "https://mexiconewsdaily.com/feed/"),
+    ("bbclatam", "BBC (Latin America)", "UK", "Latin America", "public", "https://feeds.bbci.co.uk/news/world/latin_america/rss.xml"),
+    ("elpais", "El País (English)", "Spain", "Europe", "private", "https://feeds.elpais.com/mrss-s/pages/ep/site/english.elpais.com/portada"),
 ]
 # checked every 10 minutes, not hourly: wires, breaking news, specialist press and Colorado
 FAST = ("ap", "reuters", "bno", "nbc", "nextgov", "therecord", "dtn", "cpr", "coloradosun", "fox31", "9news", "cbscolorado")
@@ -290,9 +333,9 @@ def on_topic(head, about):
 
 
 # ---------- the whole brief ----------
-def build(store, situation_items, use_ai=True, ai=None, opener=None, n_stories=6):
-    """Fetch, group, summarise (if possible), store. Returns the brief record."""
-    heads, status = fetch_all(opener=opener)
+def build(store, situation_items, use_ai=True, ai=None, opener=None, n_stories=6, keys=None):
+    """Fetch, group, summarise (if possible), store. Returns the brief record. `keys`: the outlets to read (default all)."""
+    heads, status = fetch_all(keys, opener=opener)
     stories = group(heads)
     near = [{k: i[k] for k in ("title", "tier", "site", "km", "where_text", "scenario", "url")}
             for i in situation_items if i["tier"] in ("flash", "priority")][:8]
@@ -332,6 +375,70 @@ def latest(store, day=None):
     rec = json.loads(rows[0]["data"])
     rec["day"] = rows[0]["day"]
     return rec
+
+
+# ---------- one brief per person ----------
+# The brief is built once a day for everyone (the AI summary is the costly part). Each person's version is that brief
+# with the stories they're finished with taken out, so it's worked out when it's read.
+DONE_KEEP_DAYS = 60
+
+
+def story_urls(rec, kind, index):
+    """The source links of one story in a stored brief; kind is "ai" (the summarised stories) or "group"."""
+    try:
+        if kind == "ai":
+            return [x["url"] for x in rec["ai"]["stories"][index]["sources"] if x.get("url")]
+        if kind == "group":
+            return [x["url"] for x in rec["groups"][index]["items"] if x.get("url")]
+    except (KeyError, IndexError, TypeError):
+        pass
+    raise KeyError("no such brief story")
+
+
+def _gone(store, user_id):
+    """Links this person has finished with: marked here, or rated "Not for me" on For You."""
+    uid = user_id or 0
+    urls = {r["url"] for r in store._rows("SELECT url FROM brief_done WHERE user_id=?", (uid,))}
+    urls |= {r["url"] for r in store._rows("SELECT i.url FROM news_items i JOIN news_marks m ON m.story = i.story "
+                                           "WHERE m.user_id=? AND m.rating < 0", (uid,))}
+    return urls
+
+
+def _finished(urls, gone):
+    """A story is finished when half or more of its links are. A new story on the same subject has new links, so it shows."""
+    return bool(urls) and sum(1 for u in urls if u in gone) * 2 >= len(urls)
+
+
+def personalise(store, rec, user_id):
+    """This person's version of a brief: finished stories out. Each kept story carries "index", its place in the stored brief."""
+    if not rec:
+        return rec
+    gone = _gone(store, user_id)
+    out = dict(rec)
+    if rec.get("ai"):
+        out["ai"] = dict(rec["ai"], stories=[dict(s, index=i) for i, s in enumerate(rec["ai"]["stories"])
+                                              if not _finished([x.get("url") for x in s.get("sources") or []], gone)])
+    out["groups"] = [dict(g, index=i) for i, g in enumerate(rec.get("groups") or [])
+                     if not _finished([x.get("url") for x in g.get("items") or []], gone)]
+    return out
+
+
+def finish(store, user_id, rec, kind, index, teach):
+    """"Done with this" (teach=False) or "Not for me" (teach=True: also rates the matching For You stories down)."""
+    urls = story_urls(rec, kind, index)
+    stamp = now()
+    uid = user_id or 0
+    for u in urls:
+        store._exec("INSERT INTO brief_done(user_id, url, at) VALUES(?,?,?) ON CONFLICT(user_id, url) DO UPDATE SET at=excluded.at",
+                    (uid, u, stamp))
+    if teach and urls:
+        stories = {r["story"] for r in store._rows(f"SELECT story FROM news_items WHERE url IN ({','.join('?' * len(urls))})", tuple(urls))}
+        for sid in stories:
+            store._exec("INSERT INTO news_marks(user_id, story, read_at, rating) VALUES(?,?,?,-1) ON CONFLICT(user_id, story) DO UPDATE SET "
+                        "rating=-1, read_at=CASE WHEN read_at='' THEN excluded.read_at ELSE read_at END", (uid, sid, stamp))
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=DONE_KEEP_DAYS)).isoformat(timespec="seconds")
+    store._exec("DELETE FROM brief_done WHERE at < ?", (cutoff,))
+    return len(urls)
 
 
 def days(store, n=14):

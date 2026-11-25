@@ -9,7 +9,7 @@ const post = async (path, body) => {
 const show = (el, msg) => { el.textContent = msg; el.hidden = !msg; };
 let ticket = "";
 
-function home() { location.href = "/"; }
+function home() { location.href = "/" + (/^#bin-[\w-]+$/.test(location.hash) ? location.hash : ""); }  // a scanned bin label survives the login
 
 let suggest = null;  // the passkey offered in the username field's suggestions, waiting in the background
 

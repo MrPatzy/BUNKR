@@ -14,6 +14,69 @@ Element.prototype.replaceChildren = function (...kids) {
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
+// Python's network errors in plain words: what people see during an outage
+function plainError(e) {
+  const t = String(e || "");
+  if (/name resolution|Name or service not known|Errno -[23]|Network is unreachable|No route to host|getaddrinfo/i.test(t)) return "no internet connection";
+  if (/timed out|timeout/i.test(t)) return "it didn't answer in time";
+  if (/Connection refused/i.test(t)) return "it refused the connection";
+  if (/CERTIFICATE_VERIFY_FAILED|SSL/i.test(t)) return "a secure-connection problem";
+  const m = t.match(/HTTP Error (\d{3})(?:: ([^>]+))?/);
+  if (m) return `the site answered ${m[1]}${m[2] ? " (" + m[2].trim() + ")" : ""}`;
+  return t.replace(/^URLError: <urlopen error (.*)>$/, "$1");
+}
+// Long help text on the screens shows two lines; tap it for the rest.
+// The one place explanatory text gets folded. The plain paragraphs right under a card's heading move behind a small ⓘ on
+// that heading, opened on tap. Warnings and errors (.warn, .bad), anything the app fills in (it has an id) and anything
+// hidden are left as they are. A card can opt out with data-keep-help. Call it on a card you've just built to fold its help too.
+function foldHelp(root = document) {
+  for (const card of root.querySelectorAll("main .card:not([data-keep-help])")) {
+    if (card.dataset.helpDone) continue;
+    card.dataset.helpDone = "1";
+    const h2 = card.querySelector(":scope > h2, :scope > .row > h2");
+    if (!h2) continue;
+    const body = card.querySelector(":scope > .tile-body");
+    const first = body ? body.firstElementChild : (h2.parentElement === card ? h2 : h2.parentElement).nextElementSibling;
+    const paras = [];
+    for (let el = first; el && el.matches("p.muted:not([id]):not([hidden])"); el = el.nextElementSibling) paras.push(el);
+    if (!paras.length) continue;
+    const box = h("div", { class: "help", hidden: true });
+    paras[0].before(box);
+    box.append(...paras);
+    const btn = h("button", { type: "button", class: "info", "aria-label": "More about this", "aria-expanded": "false", title: "More about this",
+      onclick: (e) => { e.stopPropagation(); box.hidden = !box.hidden; btn.setAttribute("aria-expanded", String(!box.hidden)); },
+      onkeydown: (e) => e.stopPropagation() });
+    h2.append(btn);
+  }
+}
+function clampHelp() {
+  $$("main p.muted").forEach((p) => {
+    if (p.classList.contains("clamp") || p.id || p.closest(".help") || p.textContent.trim().length < 140) return;  // short ones, and ones the app fills in, stay
+    p.classList.add("clamp"); p.title = "Tap for more";
+    p.addEventListener("click", () => p.classList.add("open"));
+  });
+}
+function markAddFolds(root = document) {
+  for (const d of root.querySelectorAll("main details:not(.add-form)")) {
+    const s = d.querySelector(":scope > summary");
+    if (s && /^(Add|Write|Register|New) /.test(s.textContent.trim())) d.classList.add("add-form");
+  }
+}
+new MutationObserver((ms) => { for (const m of ms) for (const n of m.addedNodes) if (n.nodeType === 1) markAddFolds(n.parentElement || n); })
+  .observe(document.querySelector("main"), { childList: true, subtree: true });
+// A form folded behind "Add …" or "Edit …" opens when something scrolls to it (an Edit button does).
+const scrollIntoViewPlain = Element.prototype.scrollIntoView;
+Element.prototype.scrollIntoView = function (...args) {
+  for (let d = this.closest("details"); d; d = d.parentElement && d.parentElement.closest("details")) d.open = true;
+  const card = this.closest(".card.foldable.folded");
+  if (card) card.querySelector(".fold-head h2").click();
+  const addCard = this.closest(".add-card");   // the inventory add form, folded until something opens it
+  if (addCard && !addCard.classList.contains("open")) {
+    addCard.classList.add("open");
+    const b = document.getElementById("add-open"); if (b) b.setAttribute("aria-expanded", "true");
+  }
+  return scrollIntoViewPlain.apply(this, args);
+};
 
 function h(tag, attrs = {}, ...children) {
   const el = document.createElement(tag);
@@ -92,18 +155,23 @@ const LEVEL = { "Very High": 5, "Relatively High": 4, "Relatively Moderate": 3, 
 function showTab(name) {
   $$("#tabs button").forEach((b) => b.classList.toggle("active", b.dataset.tab === name));
   const btn = $("#tabs button.active");
-  if (btn) { btn.closest("details").open = true; $("#here").textContent = name === "home" ? "" : btn.textContent; }
+  if (btn) { const grp = btn.closest("details"); if (grp) grp.open = true; $("#here").textContent = name === "home" ? "" : name === "account" ? "My account" : btn.textContent; }
   closeMenu();
   $$(".tab").forEach((t) => (t.hidden = t.id !== "tab-" + name));
   try { localStorage.setItem("bunkr-tab", name); } catch {}
+  // keep the address in step with the page, so a refresh stays here (replace, so Back isn't cluttered)
+  if (location.hash !== "#" + name) { try { history.replaceState(null, "", "#" + name); } catch {} }
   if (name === "kit") { loadDrives(); if (!libraries) loadLibraries(); }
   if (name === "documents") loadDocSizes();
   if (name === "nodes") { loadNodes(); loadConflicts(); }
-  if (name === "household") { loadUsers(); loadAudit(); loadTwoStep(); loadFlightSettings(); loadMail(); loadHA(); loadNaming(); loadFoodSources(); loadKroger(); loadAI(); loadVersion(); }
+  if (name === "account") { renderAccount(); loadTwoStep(); loadPush(); }
+  if (name === "household") { loadUsers(); loadAudit(); loadFlightSettings(); loadMail(); loadHA(); loadNaming(); loadFoodSources(); loadKroger(); loadAI(); loadVersion(); if (isAdmin()) { loadComms(); loadNewsSources(); } }  // partner hubs and news sources live here
   if (name === "situation") loadSituation();
+  if (name === "sites") loadStation();
   if (name === "brief") loadNewsTab();
-  if (name === "home") { refloat(); if (!PUSH) loadPush(); }
-  if (name === "comms") { loadComms(); loadRadio(); }
+  if (name === "home") refloat();
+  if (name === "comms") loadComms();
+  if (name === "radios") { loadMesh(); loadRadio(); }
   if (name === "family") { loadFamily(); loadMesh(); }
   if (name === "medical") loadMedical();
   if (name === "power") loadPower();
@@ -136,7 +204,9 @@ function renderNotices() {
   $("#notice-list").replaceChildren(...(list.length ? list.map((n) => h("li", { class: "notice" + (n.read_at ? "" : " unread") },
     h("button", { type: "button", class: "notice-open", onclick: () => {
       if (!n.read_at) api("POST", "notices/read", { ids: [n.id] }).then((r) => { n.read_at = "now"; NOTICES.unread = r.unread; renderNotices(); }).catch(() => {});
-      closeNotices(); goTo(n.url);
+      closeNotices();
+      const link = noticeLink(n);
+      if (!openLink(link)) goTo(link);
     } }, h("strong", {}, n.title), n.body ? h("span", { class: "notice-body" }, n.body) : null,
       h("span", { class: "muted notice-at" }, sinceIso(n.at))),
     n.read_at ? null : h("button", { type: "button", class: "link notice-mark", "aria-label": `Mark "${n.title}" read`, onclick: () =>
@@ -167,7 +237,10 @@ $("#notice-all").addEventListener("click", () => guarded(async () => {
   (NOTICES.items || []).forEach((n) => { n.read_at = n.read_at || "now"; });
   NOTICES.unread = r.unread; renderNotices();
 }));
-document.addEventListener("click", (e) => { if (!$("#notice-panel").hidden && !e.target.closest("#notice-panel, #bell")) closeNotices(); });
+// a tap outside the panel closes it; a button the panel just redrew away (✓ on one notification) isn't "outside"
+document.addEventListener("click", (e) => {
+  if (!$("#notice-panel").hidden && e.target.isConnected && !e.target.closest("#notice-panel, #bell")) closeNotices();
+});
 addEventListener("keydown", (e) => { if (e.key === "Escape") closeNotices(); });
 // the count stays fresh while the app is open; a push arriving also refreshes it
 setInterval(() => { if (S && S.require_login && !document.hidden) loadNotices(); }, 60000);
@@ -178,6 +251,11 @@ const wide = matchMedia("(min-width: 1000px)");
 const topHeight = () => document.documentElement.style.setProperty("--top-h", $(".top").offsetHeight + "px");
 addEventListener("resize", topHeight);
 topHeight();
+// The window's real height, for dialogs and the notifications panel. In the Android app's web view "vh" can come out
+// wrong (a dialog shrank to just its title), so they use this, with vh only as the fallback.
+const appHeight = () => innerHeight > 200 && document.documentElement.style.setProperty("--app-h", innerHeight + "px");
+addEventListener("resize", appHeight);
+appHeight();
 function openMenu() {
   if (wide.matches) return;
   document.body.classList.add("menu-open");
@@ -199,11 +277,77 @@ $$("#tabs details").forEach((d) => {
   try { const v = localStorage.getItem("bunkr-nav-" + d.dataset.group); if (v) d.open = v === "open"; } catch {}
   d.addEventListener("toggle", () => { try { localStorage.setItem("bunkr-nav-" + d.dataset.group, d.open ? "open" : "shut"); } catch {} });
 });
-addEventListener("hashchange", () => { const t = location.hash.slice(1); if (t && $(`#tabs [data-tab="${t}"]`) && !$(`#tabs [data-tab="${t}"]`).hidden) showTab(t); });
+addEventListener("hashchange", () => {
+  const t = location.hash.slice(1);
+  if (openLink(location.hash)) return;
+  if (t && $(`#tabs [data-tab="${t}"]`) && !$(`#tabs [data-tab="${t}"]`).hidden) showTab(t);
+});
+// Links that open one thing: a notification or a push (#story-, #news-brief, #sit-) or a bin label (#bin-).
+function openLink(hash) {
+  const t = decodeURIComponent(String(hash || "").replace(/^#/, ""));
+  if (t.startsWith("bin-")) { openBin(t.slice(4)); return true; }
+  if (t.startsWith("story-")) { openStory(t.slice(6)); return true; }
+  if (t === "news-brief") { showTab("brief"); showNewsView("brief"); history.replaceState(null, "", "#brief"); return true; }
+  if (t.startsWith("sit-")) { openSit(t.slice(4)); return true; }
+  return false;
+}
+// what a notification is about, from its tag (notifications saved before these links existed say only "/#brief")
+function noticeLink(n) {
+  const tag = n.tag || "";
+  if (tag.startsWith("news-") && tag !== "news-flags") return "#story-" + tag.slice(5);
+  if (tag === "brief") return "#news-brief";
+  if (tag.startsWith("sit-")) return "#sit-" + encodeURIComponent(tag.slice(4));
+  return (n.url || "").includes("#") ? "#" + n.url.split("#")[1] : "#home";
+}
+async function openStory(sid) {
+  showTab("brief");
+  if (NEWS.view !== "feed") showNewsView("feed");
+  history.replaceState(null, "", "#brief");
+  const [r] = await Promise.all([api("GET", "news/stories?ids=" + encodeURIComponent(sid)).catch(() => null), loadNews()]);
+  const s = r && r.stories && r.stories[0];
+  if (!s) return toast("That story has dropped out of the news (BUNKR keeps a few days).", true);
+  $$(`#news-list .story-card[data-id="${s.id}"]`).forEach((c) => c.remove());
+  const card = storyCard(s);
+  card.classList.add("focus");
+  $("#news-list").prepend(card);
+  const d = card.querySelector("details");
+  if (d) d.open = true;
+  card.scrollIntoView({ block: "start" });
+}
+async function openSit(uid) {
+  showTab("situation");
+  history.replaceState(null, "", "#situation");
+  await loadSituation();
+  const el = $$("#tab-situation .sit-item").find((x) => x.dataset.uid === uid);
+  if (!el) return toast("That alert has ended.");
+  const fold = el.closest("details");
+  if (fold) fold.open = true;
+  const more = el.querySelector("details");
+  if (more) more.open = true;
+  el.classList.add("focus");
+  el.scrollIntoView({ block: "center" });
+}
+// A bin label (QR code or NFC sticker) links to #bin-<location uid>: Inventory, showing what's in that place and below it.
+function openBin(uid) {
+  const l = S && S.locations.find((x) => x.uid === uid);
+  if (!l) return toast("That label's place isn't in BUNKR (anymore).", true);
+  showTab("inventory");
+  $("#inv-search").value = "";
+  $("#inv-filter").value = "";
+  $("#inv-loc-filter").value = String(l.id);
+  renderInventory();
+  const here = S.items.filter((i) => inLocation(i, String(l.id)));
+  const soon = here.filter((i) => i.expires && i.expires <= new Date(Date.now() + 30 * 864e5).toISOString().slice(0, 10)).length;
+  toast(`${l.name}: ${here.length} item${here.length === 1 ? "" : "s"}` + (soon ? `, ${soon} expiring within a month` : "."));
+  history.replaceState(null, "", "#inventory");
+}
 
 /* ---------- state ---------- */
 async function refresh() {
   S = await api("GET", "state");
+  // features held back from this release stay out of sight unless the hub switches them on (BUNKR_PREVIEW)
+  $("#imp-menu").hidden = !(S.preview || []).includes("csv_import");
+  $("#app-section").hidden = !(S.preview || []).includes("phone_app");
   if (!NOTICES || NOTICES.unread !== S.unread) { setUnread(S.unread); if (!$("#notice-panel").hidden) loadNotices(); }
   renderSession();
   renderHome();
@@ -219,7 +363,7 @@ async function refresh() {
 
 /* ---------- home: family call, check-in, board ---------- */
 // The simple view shows only what a family member needs day to day; "All screens" shows everything.
-const SIMPLE_TABS = ["home", "brief", "situation", "inventory", "shopping", "scenarios", "family", "medical", "household"];
+const SIMPLE_TABS = ["home", "account", "brief", "situation", "inventory", "shopping", "scenarios", "family", "medical", "household", "comms"];
 const sinceIso = (iso) => {
   if (!iso) return "";
   const s = (Date.now() - new Date(iso)) / 1000;
@@ -254,7 +398,8 @@ $("#lookup-form").addEventListener("submit", (e) => {
 function renderHome() {
   const lib = libraryBase();
   const empty = new Set();  // tiles with nothing to show right now
-  if (!(S.library && S.library.ready)) empty.add("lookup");
+  const libReady = !!(S.library && S.library.ready);
+  for (const id of ["lookup-title", "lookup-form", "lookup-out"]) $("#" + id).hidden = !libReady;
   $("#lookup-all").hidden = !lib.url;
   $("#lookup-all").href = lib.url;
   $("#lookup-home").hidden = !lib.homeOnly;
@@ -276,6 +421,21 @@ function renderHome() {
         call.drill ? "End drill" : "All clear") : null);
   }
   if (!renderLastCall(call)) empty.add("lastcall");
+  // the forecast saved every 3 hours (it's here even when the internet isn't), and the home station's reading
+  const w = S.weather_home, st = S.station_now;
+  $("#weather-card").hidden = !w && !st;
+  if (w || st) $("#home-weather").replaceChildren(
+    st ? h("p", { class: "wx-now" }, h("strong", {}, "Now: "), [st.temp_f != null ? `${Math.round(st.temp_f)}°F` : "",
+      st.humidity != null ? `${Math.round(st.humidity)}% humidity` : "",
+      st.wind_mph != null ? `wind ${st.wind_from || ""} ${Math.round(st.wind_mph)}` + (st.gust_mph ? ` g${Math.round(st.gust_mph)}` : "") + " mph" : "",
+      st.pressure_hpa != null ? `${Math.round(st.pressure_hpa)} hPa` + (st.pressure_trend ? ` ${st.pressure_trend}` : "") : "",
+      st.rain_day_in ? `${st.rain_day_in}" rain today` : ""].filter(Boolean).join(" · "),
+      h("span", { class: "muted" }, ` (${st.name}, ${sinceIso(st.at)})`)) : null,
+    ...(w ? w.periods : []).map((p) => h("p", { class: "wx-period" }, h("strong", {}, `${p.name}: `), `${p.text}, ${p.temp}°F`,
+      p.pop >= 10 ? h("span", { class: "muted" }, ` · ${p.pop}% rain/snow`) : null, p.wind ? h("span", { class: "muted" }, ` · wind ${p.wind}`) : null)),
+    w && w.days.length ? h("ul", { class: "plain wx-days" }, ...w.days.slice(w.periods.length > 1 ? 1 : 0, 6).map((d) => h("li", {}, d))) : null,
+    w ? h("p", { class: w.stale ? "warn" : "muted" }, w.periods.length ? `National Weather Service forecast, saved ${w.age}` + (w.stale ? ": can't reach the weather service right now." : ".")
+      : `The saved forecast has run out (saved ${w.age}).`) : null);
   if (!renderBackupStatus()) empty.add("backup");
   if (!renderHostStatus()) empty.add("hub");
   const md = S.med_due || [];
@@ -283,9 +443,9 @@ function renderHome() {
   $("#home-med").replaceChildren(...md.map((d) => h("p", {}, h("strong", { class: d.kind === "out" ? "bad" : "" }, d.text))),
     h("p", {}, h("button", { class: "link", onclick: () => showTab("medical") }, "Open Medical")));
   const me = S.me_person;
-  $("#me-name").textContent = me ? `as ${me.name}` : "";
-  $("#checkin-help").textContent = me ? (call ? "Answer the family call: tap how you are." : "Let the family know how you are. It shows on everyone's Home screen.")
-    : S.can_call ? "Your login isn't linked to a person yet: link it on the Family tab. You can still check others in below." : "Your login isn't linked to a person yet. Ask whoever set up BUNKR to link it on the Family tab.";
+  $("#checkin-help").hidden = !!me;
+  $("#checkin-help").textContent = me ? "" : S.can_call ? "Your login isn't linked to a person yet: link it on the Family tab. You can still check others in below."
+    : "Your login isn't linked to a person yet. Ask whoever set up BUNKR to link it on the Family tab.";
   $("#checkin-btns").replaceChildren(...Object.entries(b.statuses).map(([k, v]) => h("button", { class: "st-" + k, disabled: !me,
     onclick: () => checkIn(me && me.uid, k) }, v)));
   $("#checkin-btns").hidden = $("#checkin-extra").hidden = !me;
@@ -293,44 +453,48 @@ function renderHome() {
   const rank = (p) => p.last && p.last.status === "help" ? 0 : p.waiting ? 1 : 2;
   const flightOf = Object.fromEntries((b.flights || []).map((f) => [f.person_uid, f]));
   $("#board").replaceChildren(...[...b.people].sort((x, y) => rank(x) - rank(y)).map((p) => {
-    const l = p.last;
-    const bits = l ? [sinceIso(l.at), l.via !== "app" ? "via " + (b.via[l.via] || l.via) : "", l.by_name ? "entered by " + l.by_name : "",
-      l.place, l.note, !l.battery_low && l.battery != null ? `battery ${l.battery}%` : ""].filter(Boolean) : [];
-    return h("li", {},
-      h("span", { class: "who" }, p.name, p.remote ? h("span", { class: "tag" }, p.site || "lives elsewhere") : null),
-      h("span", { class: l ? "state-" + l.status : "state-none" }, l ? p.status_label : "no check-in yet"),
-      l && l.battery_low ? h("span", { class: "tag warn lowbatt", title: "Their phone or radio said its battery was low when they checked in. They may go quiet: that doesn't mean something is wrong." },
-        "🔋 low battery" + (l.battery != null ? ` ${l.battery}%` : "") + ", may go quiet") : null,
-      h("span", { class: "meta" }, bits.join(" · "),
-        l && l.lat != null ? [" · ", h("a", { href: mapLink(l), target: "_blank", rel: "noopener" }, "map")] : null,
-        p.waiting ? h("span", { class: "waiting" }, (bits.length ? " · " : "") + "hasn't answered the call") : null,
-        S.can_call && (!me || p.uid !== me.uid) ? [bits.length || p.waiting ? " · " : "", h("button", { class: "link", "aria-expanded": String(FOR_OTHER.uid === p.uid),
-          onclick: () => { FOR_OTHER = FOR_OTHER.uid === p.uid ? {} : { uid: p.uid, note: "", flight: "" }; renderHome(); } },
-          FOR_OTHER.uid === p.uid ? "close" : "check in for them")] : null),
-      FOR_OTHER.uid === p.uid ? checkInForPanel(p, b.statuses) : null,
+    // one line each: name, status in its colour, time ago. Tap it for the details.
+    const l = p.last, open = OPEN_PERSON === p.uid;
+    const bits = l ? [l.via !== "app" ? "via " + (b.via[l.via] || l.via) : "", l.by_name ? "entered by " + l.by_name : "",
+      p.remote && l.place === p.site ? "" : l.place, l.note,  // the tag on the line already says where they live
+      l.battery != null ? `battery ${l.battery}%` : ""].filter(Boolean) : [];
+    const canFor = S.can_call && (!me || p.uid !== me.uid);
+    return h("li", { class: open ? "open" : "" },
+      h("button", { type: "button", class: "board-line", "aria-expanded": String(open), onclick: () => {
+        OPEN_PERSON = open ? "" : p.uid; if (open && FOR_OTHER.uid === p.uid) FOR_OTHER = {}; renderHome(); } },
+        h("span", { class: "who" }, p.name, p.remote ? h("span", { class: "tag" }, p.site || "lives elsewhere") : null),
+        h("span", { class: "state " + (l ? "state-" + l.status : "state-none") }, l ? p.status_label : "no check-in yet"),
+        l && l.battery_low ? h("span", { class: "lowbatt", "aria-label": "low battery" }, "🔋") : null,
+        h("span", { class: p.waiting ? "waiting" : "ago" }, p.waiting ? "no answer yet" : l ? sinceIso(l.at) : "")),
+      open ? h("div", { class: "person-more" },
+        bits.length ? h("p", { class: "meta" }, bits.join(" · "),
+          l && l.lat != null ? [" · ", h("a", { href: mapLink(l), target: "_blank", rel: "noopener" }, "map")] : null) : null,
+        l && l.battery_low ? h("p", { class: "warn lowbatt" }, "Their phone or radio said its battery was low when they checked in. They may go quiet: that doesn't mean something is wrong.") : null,
+        p.waiting ? h("p", { class: "waiting" }, "Hasn't answered the call.") : null,
+        canFor && FOR_OTHER.uid !== p.uid ? h("button", { type: "button", onclick: () => { FOR_OTHER = { uid: p.uid, note: "", flight: "" }; renderHome(); } }, "Check in for them") : null,
+        FOR_OTHER.uid === p.uid ? checkInForPanel(p, b.statuses) : null) : null,
       flightOf[p.uid] ? flightBlock(flightOf[p.uid]) : null);
   }));
+  $("#call-open").hidden = !S.can_call;
+  renderChips(call);
   const a = S.analysis;
   $("#home-ready").replaceChildren(h("strong", { class: tone(a.overall) }, `${a.overall}% ready. `),
     `Water for ${a.water_days} of ${a.target_days} days, food for ${a.food_days} days.`,
     (a.gaps || []).length ? h("span", { class: "muted" }, ` Biggest gap: ${a.gaps[0].label || a.gaps[0].name || a.gaps[0]}.`) : null);
   const top = (S.situation_top || []).slice(0, 4);
-  $("#home-alerts").replaceChildren(...(top.length ? top.map((x) => h("p", {}, h("strong", { class: x.tier === "flash" ? "bad" : "" }, x.title),
+  if (!top.length) empty.add("alerts");  // shows only when something is near
+  $("#home-alerts").replaceChildren(...top.map((x) => h("p", {}, h("strong", { class: x.tier === "flash" ? "bad" : "" }, x.title),
     x.site && x.km != null ? h("span", { class: "muted" }, x.km === 0 ? ` · at ${x.site}` : ` · ${x.km} km away`) : null,
-    x.scenario ? [h("br"), h("button", { class: "link", onclick: () => openScenario(x.scenario) }, "Open the checklist")] : null))
-    : [h("p", { class: "muted" }, "Nothing near you right now.")]),
+    x.scenario ? [h("br"), h("button", { class: "link", onclick: () => openScenario(x.scenario) }, "Open the checklist")] : null)),
     h("p", {}, h("button", { class: "link", onclick: () => showTab("situation") }, "See everything")));
   const meet = S.places.filter((p) => ["meet_near", "meet_far", "relative", "bugout", "home"].includes(p.kind));
   $("#home-places").replaceChildren(...(meet.length ? meet.map((p) => h("li", {}, h("strong", {}, p.name), h("span", { class: "tag" }, S.site_kinds[p.kind] || p.kind),
     p.address ? h("div", { class: "muted" }, p.address, mapLink(p) ? [" · ", h("a", { href: mapLink(p), target: "_blank", rel: "noopener" }, "Directions")] : null) : null))
-    : [h("li", { class: "muted" }, "Add meeting places on Sites & alerts.")]));
+    : [h("li", { class: "muted" }, "Add meeting places on Sites & maps.")]));
   $("#home-contacts").replaceChildren(...(S.contacts.length ? S.contacts.map((c) => h("li", {}, h("strong", {}, c.name),
     c.out_of_area ? h("span", { class: "tag" }, "out of area: everyone checks in here") : null, c.relation ? h("span", { class: "muted" }, ` ${c.relation}`) : null,
     c.phone ? h("div", {}, h("a", { href: "tel:" + c.phone.replace(/[^\d+]/g, "") }, c.phone)) : null))
     : [h("li", { class: "muted" }, "Add contacts on the Family tab.")]));
-  if (!S.can_call) empty.add("sendcall");
-  if (!S.require_login || !S.me.id) empty.add("push");
-  if (!renderHomeNews()) empty.add("news");
   if (S.can_call && !$("#call-kind").options.length) {
     $("#call-kind").replaceChildren(...Object.entries(b.call_kinds).map(([k, v]) => h("option", { value: k }, v)));
     syncCallForm();
@@ -391,7 +555,7 @@ function renderHostStatus() {
 let HOME_EMPTY = new Set();
 const tileEl = (id) => $(`#home-tiles [data-tile="${id}"]`);
 function tilesForMe() {  // the tiles this login can have at all
-  return (S.home_tiles || []).filter((t) => t.who === "all" || (t.who === "admin" && isAdmin() && S.view !== "simple") || (t.who === "caller" && S.can_call));
+  return (S.home_tiles || []).filter((t) => tileEl(t.id)).filter((t) => t.who === "all" || (t.who === "admin" && isAdmin() && S.view !== "simple") || (t.who === "caller" && S.can_call));
 }
 function applyHome(empty) {
   if (empty) HOME_EMPTY = empty;
@@ -512,69 +676,88 @@ $("#arrange-default").addEventListener("click", () => confirm("New family logins
   guarded(async () => { const { order, hidden, collapsed } = S.home_layout;
     await api("POST", "home/default", { layout: { order, hidden, collapsed } }); toast("Saved as the family's starting layout"); }));
 
-// Today's news on Home: the brief's one line and its first stories.
-function renderHomeNews() {
+// The status chips at the top of Home. Each opens its own screen; one whose feature isn't set up isn't shown.
+function renderChips(call) {
+  const b = S.board, chips = [];
+  const add = (tab, text, tone, extra = {}) => {
+    const btn = $(`#tabs [data-tab="${tab}"]`);
+    if (btn && btn.hidden) return;  // this login can't see that screen
+    chips.push(h("button", { type: "button", role: "listitem", class: "hchip" + (tone ? " " + tone : ""), onclick: () => {
+      if (extra.view) { try { localStorage.setItem("bunkr-news-view", extra.view); } catch {} }
+      showTab(tab); scrollTo(0, 0); } }, text));
+  };
+  const people = b.people || [], safe = people.filter((p) => p.last && p.last.status === "safe").length;
+  const help = people.filter((p) => p.last && p.last.status === "help").length;
+  if (people.length) add("family", `${safe} of ${people.length} safe`, help ? "bad" : safe === people.length ? "good" : "");
+  const alerts = (S.situation_top || []).length;
+  add("situation", alerts ? `${alerts} alert${alerts === 1 ? "" : "s"} near us` : "No alerts near us", alerts ? "warn" : "");
+  const w = S.weather_home, st = S.station_now, p0 = w && w.periods && w.periods[0];
+  if (st && st.temp_f != null) add("situation", `Now ${Math.round(st.temp_f)}°F`, "");
+  else if (p0) add("situation", `${p0.name} ${p0.temp}°F`, "");
+  // (readiness isn't a chip: the "% ready" badge in the title bar already shows it)
   const n = S.news_home;
-  if (!n) return false;
-  const go = (v) => { try { localStorage.setItem("bunkr-news-view", v); } catch {} showTab("brief"); };
-  $("#home-news").replaceChildren(
-    n.lead ? h("p", { class: "home-news-lead" }, n.lead, " ", h("button", { class: "link", onclick: () => go("brief") }, "Morning brief")) : null,
-    n.stories.length ? h("ul", { class: "plain home-news" }, ...n.stories.map((t) => h("li", {},
-      h("button", { class: "link story-link", onclick: () => go("feed") }, t.headline), h("span", { class: "muted" }, " · " + (t.place || t.area)))))
-      : h("p", { class: "muted" }, "You're caught up."),
-    h("p", {}, h("button", { class: "link", onclick: () => go("feed") }, n.unread ? `${n.unread} unread for you` : "Open the news"),
-      " · ", h("button", { class: "link", onclick: () => go("map") }, "Map")));
-  return true;
+  if (n) add("brief", n.unread ? `${n.unread} unread news` : "News", "", { view: "feed" });
+  $("#home-chips").replaceChildren(...chips);
+  $("#home-chips").hidden = !chips.length;
 }
 function syncCallForm() {
   $("#call-site-label").hidden = !["evacuate", "meet"].includes($("#call-kind").value);
 }
 $("#call-kind").addEventListener("change", syncCallForm);
+$("#call-open").addEventListener("click", () => $("#call-dialog").showModal());
+$("#call-close").addEventListener("click", () => $("#call-dialog").close());
 $("#call-form").addEventListener("submit", (e) => {
   e.preventDefault();
   const f = e.target, kind = f.kind.value, needs = ["evacuate", "meet"].includes(kind);
-  if (needs && !S.places.length) return toast("Add places on Sites & alerts first", true);
+  if (needs && !S.places.length) return toast("Add places on Sites & maps first", true);
   const label = f.kind.selectedOptions[0].textContent + (needs ? " " + f.site_id.selectedOptions[0].textContent : "");
   const drill = f.drill.checked;
   if (!confirm(drill ? `Start a DRILL: "${label}"? Everyone sees it marked as a drill.` : `Send "${label}" to the whole family?`)) return;
   guarded(async () => { await api("POST", "calls", { kind, site_id: needs ? f.site_id.value : "", message: f.message.value, drill });
-    f.message.value = ""; f.drill.checked = false; toast(drill ? "Drill started" : "Sent to everyone"); refresh(); });
+    f.message.value = ""; f.drill.checked = false; $("#call-dialog").close(); toast(drill ? "Drill started" : "Sent to everyone"); refresh(); });
 });
 // Checking someone else in: the same buttons they'd have, plus a note and a flight to follow for them.
 // What's typed lives in FOR_OTHER so the 30-second board refresh doesn't wipe it.
 let FOR_OTHER = {};
+let OPEN_PERSON = "";  // whose details are open on the family board
 function checkInForPanel(p, statuses) {
   const note = h("input", { maxlength: 300, placeholder: `Where ${p.name} is, what they need`, value: FOR_OTHER.note || "",
     "aria-label": `Note for ${p.name}`, oninput: (e) => { FOR_OTHER.note = e.target.value; } });
-  const flight = h("input", { maxlength: 12, placeholder: "Flying? Flight number, e.g. UA 1234", value: FOR_OTHER.flight || "",
-    "aria-label": `Flight number for ${p.name}`, autocapitalize: "characters", oninput: (e) => { FOR_OTHER.flight = e.target.value; } });
+  const flight = h("input", { maxlength: 40, list: "airline-list", placeholder: "Flying? Airline and number, e.g. United 1234", value: FOR_OTHER.flight || "",
+    "aria-label": `Flight number for ${p.name}`, autocapitalize: "words", oninput: (e) => { FOR_OTHER.flight = e.target.value; } });
   return h("div", { class: "checkin-for" },
     h("p", { class: "muted" }, `Check ${p.name} in as:`),
+    note, flight,
     h("div", { class: "checkin-btns" }, ...Object.entries(statuses).map(([k, v]) => h("button", { class: "st-" + k,
       onclick: (e) => { e.target.disabled = true;
         checkIn(p.uid, k, true, { note: FOR_OTHER.note, flight: FOR_OTHER.flight }).then((ok) => { if (ok) FOR_OTHER = {}; renderHome(); }); } },
-      { safe: "Safe", moving: "On the way", help: "Needs help" }[k] || v))),
-    note, flight);
+      { safe: "Safe", moving: "On the way", help: "Needs help" }[k] || v))));
 }
 async function checkIn(personUid, status, forOther = false, extra = {}) {
   const body = { person_uid: personUid, status };
   if (forOther) {
     if ((extra.note || "").trim()) body.note = extra.note.trim();
     if ((extra.flight || "").trim()) body.flight = extra.flight.trim();
+    if (extra.callsign) body.callsign = extra.callsign;
   } else {
     const batt = await batteryNow();
     if (batt) { body.battery = batt.level; }
     if ($("#checkin-lowbat").checked) body.battery_low = true;
     body.note = $("#checkin-note").value;
-    if ($("#checkin-flight").value.trim()) body.flight = $("#checkin-flight").value.trim();
-    if ($("#checkin-loc").checked && navigator.geolocation) {
-      const pos = await new Promise((res) => navigator.geolocation.getCurrentPosition(res, () => res(null), { timeout: 8000, maximumAge: 120000 }));
-      if (pos) { body.lat = pos.coords.latitude; body.lon = pos.coords.longitude; } else toast("Couldn't get your location; sending without it", true);
+    if (($("#checkin-flight").value || extra.flight || "").trim()) body.flight = (extra.flight || $("#checkin-flight").value).trim();
+    if (extra.callsign) body.callsign = extra.callsign;
+    if ($("#checkin-loc").checked && (window.BunkrApp || navigator.geolocation)) {
+      const pos = await whereAmI();
+      if (pos) { body.lat = pos.coords.latitude; body.lon = pos.coords.longitude; if (pos.coords.accuracy != null) body.accuracy = pos.coords.accuracy; } else toast("Couldn't get your location; sending without it", true);
     }
   }
   let ok = false;
   await guarded(async () => {
     const r = await api("POST", "checkin", body);
+    if (r.confirm) {  // nothing was saved or tracked: ask which flight they mean first
+      askFlight(r.confirm, (opt) => checkIn(personUid, status, forOther, { ...extra, flight: opt.number, callsign: opt.callsign }).then((done) => { if (done && forOther) { FOR_OTHER = {}; renderHome(); } }));
+      return;
+    }
     ok = true;
     if (!forOther) { $("#checkin-note").value = ""; $("#checkin-flight").value = ""; $("#checkin-lowbat").checked = false; }
     toast(r.flight ? (forOther ? "Checked in. Following their flight." : "Checked in. Following your flight.") : "Checked in");
@@ -582,6 +765,17 @@ async function checkIn(personUid, status, forOther = false, extra = {}) {
     if (!forOther && r.airport) flightPrompt(r.airport);
   });
   return ok;
+}
+// Where the phone is. In the Android app the app itself answers (window.BunkrApp, only while BUNKR is open); in a browser, the browser does.
+function whereAmI() {
+  if (window.BunkrApp) {
+    return new Promise((res) => {
+      const t = setTimeout(() => { window.bunkrLocation = null; res(null); }, 15000);
+      window.bunkrLocation = (j) => { clearTimeout(t); window.bunkrLocation = null; res(j && j.lat != null ? { coords: { latitude: j.lat, longitude: j.lon, accuracy: j.accuracy } } : null); };
+      window.BunkrApp.locate();
+    });
+  }
+  return new Promise((res) => navigator.geolocation.getCurrentPosition(res, () => res(null), { timeout: 8000, maximumAge: 120000 }));
 }
 // Android (Chrome) phones can say their battery level; iPhones can't, so they get a "My battery is low" box.
 async function batteryNow() {
@@ -599,16 +793,29 @@ batteryNow().then((b) => {
 /* ---------- flights on the family board ---------- */
 const FLIGHT_STATUS = { added: "Looking for it", scheduled: "Scheduled", taxiing: "On the ground", airborne: "In the air",
   landed: "Landed", cancelled: "Cancelled", diverted: "Diverted" };
-const clock = (iso) => iso ? new Date(iso).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "";
+const clockIn = (d, tz) => {
+  try { return d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit", timeZoneName: "short", ...(tz ? { timeZone: tz } : {}) }); }
+  catch (e) { return d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit", timeZoneName: "short" }); }
+};
+// "5:03 PM MST" in the viewer's zone, plus "(4:03 PM PST at LAX)" when the airport's zone reads differently
+const clock = (iso, tz, code) => {
+  if (!iso) return "";
+  const d = new Date(iso), mine = clockIn(d), there = tz ? clockIn(d, tz) : mine;
+  return there === mine ? mine : `${mine} (${there}${code ? " at " + code : ""})`;
+};
 function flightBlock(f) {
   const me = S.me_person, t = f.times;
-  const route = [f.origin_city || f.origin, f.dest_city || f.dest].filter(Boolean).join(" → ");
+  const clockO = (iso) => clock(iso, f.origin_tz, f.origin), clockD = (iso) => clock(iso, f.dest_tz, f.dest);
+  const route = [f.origin_city || f.origin, f.dest ? (f.dest_guess ? "probably " : "") + (f.dest_city || f.dest) : ""].filter(Boolean).join(" → ");
   const tone = { cancelled: "bad", diverted: "bad", landed: "good", airborne: "", taxiing: "", scheduled: "", added: "" }[f.status];
   const late = f.late_min != null && f.late_min >= 15 ? h("strong", { class: f.late_min >= 30 ? "bad" : "warn" }, ` ${f.late_min} min late`) : null;
-  const dep = t.actual_out ? `Left ${clock(t.actual_out)}` : t.estimated_out || t.scheduled_out
-    ? `Departs ${clock(t.estimated_out || t.scheduled_out)}` + (t.estimated_out && t.scheduled_out && t.estimated_out !== t.scheduled_out ? ` (was ${clock(t.scheduled_out)})` : "") : "";
+  const dep = t.actual_out ? `Left ${clockO(t.actual_out)}` : t.estimated_out || t.scheduled_out
+    ? `Departs ${clockO(t.estimated_out || t.scheduled_out)}` + (t.estimated_out && t.scheduled_out && t.estimated_out !== t.scheduled_out ? ` (was ${clockO(t.scheduled_out)})` : "") : "";
   const arrIso = t.actual_in || t.actual_on || t.estimated_in || t.estimated_on || t.scheduled_in || t.scheduled_on;
-  const arr = arrIso ? (t.actual_in || t.actual_on ? `Arrived ${clock(arrIso)}` : `Arrives ${clock(arrIso)}`) : "";
+  const arr = arrIso ? (t.actual_in || t.actual_on ? `Arrived ${clockD(arrIso)}` : `Arrives ${clockD(arrIso)}`) : "";
+  const ib = f.inbound, ibWhere = f.origin_city || f.origin || "the airport";
+  const inbound = ib ? `${f.person_name}'s plane is ` + (ib.at_origin ? `at ${f.origin || ibWhere}`
+    : `on its way to ${f.origin || ibWhere}` + (ib.eta_min != null ? `, about ${ib.eta_min} min out` : "")) : "";
   const p = f.pos;
   const live = p ? [p.ground ? "On the ground" : `${Number(p.alt_ft || 0).toLocaleString()} ft`,
     p.gs_kt && !p.ground ? `${Math.round(p.gs_kt * 1.151)} mph` : "", p.km_to_go != null ? `${Math.round(p.km_to_go * 0.621)} mi to go` : "",
@@ -617,12 +824,16 @@ function flightBlock(f) {
   const gates = [g.gate_origin ? `Gate ${g.terminal_origin ? g.terminal_origin + " " : ""}${g.gate_origin}` : "",
     g.gate_destination ? `arrives gate ${g.terminal_destination ? g.terminal_destination + " " : ""}${g.gate_destination}` : "",
     g.baggage_claim ? `bags at ${g.baggage_claim}` : ""].filter(Boolean).join(" · ");
-  const faa = Object.entries(f.faa || {}).map(([code, x]) => h("div", { class: "warn" }, `${code}: ${x.text}`));
+  const faaAll = Object.entries(f.faa || {});
+  const faa = faaAll.flatMap(([code, x]) => (x.lines || [`${code}: ${x.text}`]).map((t) => h("div", { class: "warn" }, t)));
+  if (faaAll.length) faa.push(h("details", { class: "muted" }, h("summary", {}, "FAA details"),
+    ...faaAll.map(([code, x]) => h("div", {}, `${code}: ${x.raw || x.text}`))));
   return h("div", { class: "flight" },
     h("div", { class: "flight-head" }, h("span", { "aria-hidden": "true" }, "✈ "), h("strong", {}, f.ident),
       route ? ` · ${route}` : "", " ", h("span", { class: "chip " + (tone || "") }, FLIGHT_STATUS[f.status] || f.status), late),
     dep || arr ? h("div", {}, [dep, arr].filter(Boolean).join(" · ")) : null,
     live ? h("div", {}, live, " ", h("a", { href: `https://www.google.com/maps/search/?api=1&query=${p.lat},${p.lon}`, target: "_blank", rel: "noopener" }, "where")) : null,
+    inbound ? h("div", { class: "muted" }, inbound) : null,
     gates ? h("div", { class: "muted" }, gates) : null,
     ...faa,
     f.status === "added" ? h("div", { class: "muted" }, "Looking for it. Live position shows once the plane is heard; FlightAware times show if it's set up.") : null,
@@ -632,14 +843,31 @@ function flightBlock(f) {
       (me && me.uid === f.person_uid) || S.can_call ? [" · ", h("button", { class: "link", onclick: () => confirm(`Stop following ${f.ident}?`) &&
         guarded(async () => { await api("POST", `flights/${f.uid}/end`); refresh(); }) }, "Stop following")] : null));
 }
+// "Did you mean…?": BUNKR guessed, changed something or found no match, so nothing is tracked until a choice is tapped.
+function askFlight(q, pick) {
+  const box = $("#flight-prompt");
+  box.replaceChildren(h("p", {}, q.message),
+    h("div", { class: "checkin-btns" }, ...q.options.map((o) => h("button", { type: "button", class: "primary", onclick: () => { box.hidden = true; pick(o); } }, o.label)),
+      h("button", { type: "button", class: "link", onclick: () => (box.hidden = true) }, q.options.length ? "None of these" : "OK")));
+  box.hidden = false;
+  box.scrollIntoView({ block: "nearest" });
+}
+api("GET", "flights/airlines").then((d) => {
+  if (d && d.airlines) $("#airline-list").replaceChildren(...d.airlines.map((a) => h("option", { value: a.name + " ", label: `${a.name} (${a.code})` })));
+}).catch(() => {});
 function flightPrompt(a) {
   // after checking in at an airport: offer to follow the flight
   const box = $("#flight-prompt");
-  const input = h("input", { maxlength: "12", placeholder: "Flight, e.g. UA 1234", "aria-label": "Flight number", autocapitalize: "characters" });
+  const input = h("input", { maxlength: "40", list: "airline-list", placeholder: "Flight, e.g. United 1234", "aria-label": "Flight number", autocapitalize: "words" });
   box.replaceChildren(h("p", {}, `You're at ${a.iata}. Flying? The family can follow your flight.`),
     a.home ? h("p", { class: "muted" }, `Not going to ${a.home}? Add the airport: "UA 1234 to LAX".`) : null,
     h("form", { class: "row gap", onsubmit: (e) => { e.preventDefault(); guarded(async () => {
-      await api("POST", "flights", { number: input.value, origin: a.iata }); box.hidden = true; toast("Following your flight"); refresh(); }); } },
+      const send = async (extra) => {
+        const r = await api("POST", "flights", { number: input.value, origin: a.iata, ...extra });
+        if (r.confirm) return askFlight(r.confirm, (o) => guarded(() => send({ number: o.number, callsign: o.callsign })));
+        box.hidden = true; toast("Following your flight"); refresh();
+      };
+      await send({}); }); } },
       input, h("button", { type: "submit", class: "primary" }, "Follow my flight"),
       h("button", { type: "button", class: "link", onclick: () => (box.hidden = true) }, "Not flying")));
   box.hidden = false;
@@ -656,7 +884,7 @@ async function loadHA() {
     f.url.value = r.url; f.events.checked = r.events; f.actions.value = r.actions; f.sensors.value = r.sensors; f.token.value = "";
   }
   $("#ha-forget").hidden = !r.token;
-  $("#ha-state").textContent = !r.url || !r.token ? "Not connected yet." : r.status.error ? `Last problem: ${r.status.error}`
+  $("#ha-state").textContent = !r.url || !r.token ? "Not connected yet." : r.status.error ? `Last problem: ${plainError(r.status.error)}`
     : r.status.last ? `Connected. Last event sent: ${r.status.last}.` : "Saved. Use Test the connection to check it.";
 }
 $("#ha-form").addEventListener("submit", (e) => {
@@ -715,7 +943,7 @@ function aiShow(r) {
   const cli = !r ? "" : !r.cli ? "No AI command is set on the hub yet."
     : (r.cli_found ? `The hub has the AI command (${r.cli})` + (r.cli_login ? " and a login file." : " but no login file (ai.env).")
         : `The AI command (${r.cli}) isn't installed on the hub.`);
-  const st = r && r.status && r.status.error ? ` Last try: ${r.status.error}` : "";
+  const st = r && r.status && r.status.error ? ` Last try: ${plainError(r.status.error)}` : "";
   $("#ai-note").textContent = (ollama ? "Ollama runs a free model on your own computer; nothing leaves your network." : cli) + st;
 }
 $("#ai-form").provider.addEventListener("change", () => aiShow(null));
@@ -891,7 +1119,7 @@ async function loadKroger() {
   }
   $("#kroger-forget").hidden = !r.has_secret;
   const s = r.status || {};
-  $("#kroger-status").textContent = !r.ready ? "Not set up." : s.ok === false ? `Last problem: ${s.error}`
+  $("#kroger-status").textContent = !r.ready ? "Not set up." : s.ok === false ? `Last problem: ${plainError(s.error)}`
     : s.at ? `Working. Last lookup ${sinceIso(s.at)}.` : "Set up. Scan something, or press Test it.";
 }
 $("#kroger-form").addEventListener("submit", (e) => {
@@ -915,28 +1143,18 @@ async function loadLocalWatch() {
   $("#lw-places").replaceChildren(...(r.places.length ? r.places.map((p) => {
     const st = (r.news || {})[p.name];
     return h("li", {}, h("strong", {}, p.label), p.state ? `, ${p.state}` : "",
-      st ? h("span", { class: st.ok ? "muted" : "warn" }, st.ok ? ` · ${st.count} headline${st.count === 1 ? "" : "s"} today` : ` · ${st.error}`) : null);
+      st ? h("span", { class: st.ok ? "muted" : "warn" }, st.ok ? ` · ${st.count} headline${st.count === 1 ? "" : "s"} today` : ` · ${plainError(st.error)}`) : null);
   }) : [h("li", { class: "muted" }, "No towns yet. Give sites a full address (\"…, Nederland, CO 80466\") and set where each person lives on the Family tab.")]));
   const f = $("#lw-form");
   if (!f.contains(document.activeElement)) {
-    f.extra_places.value = r.extra_places.join("\n"); f.subreddits.value = r.subreddits.join("\n");
-    f.bluesky.checked = !!r.bluesky; f.reddit_id.value = r.reddit_id || ""; f.reddit_secret.value = "";
-    f.reddit_secret.placeholder = r.has_secret ? "saved: leave empty to keep it" : "from reddit.com/prefs/apps";
+    f.extra_places.value = r.extra_places.join("\n");
   }
-  $("#lw-forget").hidden = !r.has_secret;
-  const s = r.status || {}, line = (k, name) => s[k] ? `${name}: ${s[k].ok ? `${s[k].count} matching post${s[k].count === 1 ? "" : "s"}` : s[k].error}` : "";
-  $("#lw-status").textContent = [line("bluesky", "Bluesky"), r.reddit_ready ? line("reddit", "Reddit") || "Reddit: set up, waiting for the next check"
-    : "Reddit: not set up"].filter(Boolean).join(" · ");
 }
 $("#lw-form").addEventListener("submit", (e) => {
   e.preventDefault();
-  const f = e.target, body = { extra_places: f.extra_places.value, subreddits: f.subreddits.value, bluesky: f.bluesky.checked, reddit_id: f.reddit_id.value.trim() };
-  if (f.reddit_secret.value.trim()) body.reddit_secret = f.reddit_secret.value.trim();
-  guarded(async () => { await api("POST", "localwatch", body); f.reddit_secret.value = ""; toast("Saved"); loadLocalWatch(); });
+  guarded(async () => { await api("POST", "localwatch", { extra_places: e.target.extra_places.value }); toast("Saved"); loadLocalWatch(); });
 });
 $("#lw-run").addEventListener("click", () => guarded(async () => { await api("POST", "localwatch/run"); toast("Checking now. Give it a minute."); setTimeout(loadLocalWatch, 30000); }));
-$("#lw-forget").addEventListener("click", () => confirm("Forget the Reddit secret? Reddit stops until a new one is saved.") &&
-  guarded(async () => { await api("POST", "localwatch", { forget_secret: true }); loadLocalWatch(); }));
 
 /* ---------- BUNKR version: which one this is, and whether a newer one is out (admins choose when to upgrade) ---------- */
 let versionPoll = null;
@@ -965,7 +1183,7 @@ async function loadVersion() {
   $("#version-state").textContent = field ? "The hub checks for new versions."
     : !r.repo ? "No project address is set, so this BUNKR doesn't check for new versions."
     : !r.enabled ? "Not checking for new versions."
-    : r.error ? `Couldn't check: ${r.error}`
+    : r.error ? `Couldn't check: ${plainError(r.error)}`
     : r.checked_at ? `Checked ${sinceIso(r.checked_at)}.${r.available ? "" : " You have the latest."}` : "Checks once a day.";
 }
 /* Upgrade now (.deb installs): BUNKR only leaves a request; a separate root service checks the signed release, backs up,
@@ -1049,6 +1267,7 @@ async function pushSub() {
 async function loadPush() {
   if (!S.require_login || !S.me.id) return;
   PUSH = await api("GET", "push/key").catch(() => null);
+  loadPhones();
   const sub = await pushSub().catch(() => null);
   const ok = pushSupported() && PUSH && PUSH.key;
   $("#push-ios").hidden = !(isIOS() && !standalone());
@@ -1090,7 +1309,32 @@ $("#push-toggle").addEventListener("click", () => guarded(async () => {
 }));
 $("#push-test").addEventListener("click", () => guarded(async () => {
   const r = await api("POST", "push/test");
-  toast(r.sent ? "Test sent. It should arrive in a few seconds." : "The push service didn't accept it; try turning notifications off and on.", !r.sent);
+  toast(r.sent || r.app ? "Test sent. It should arrive in a few seconds." : "The push service didn't accept it; try turning notifications off and on.", !(r.sent || r.app));
+}));
+async function loadPhones() {
+  if (!S.require_login || !S.me.id || !(S.preview || []).includes("phone_app")) return;
+  const admin = S.me.role === "admin";
+  const v = window.BunkrApp ? null : await api("GET", "app/version").catch(() => null);   // the app doesn't need to offer itself
+  $("#app-download").hidden = !(v && v.available);
+  if (v && v.available) $("#app-download-note").textContent = `Version ${v.version}, ${(v.size / 1048576).toFixed(1)} MB. Tap it on your phone, then open the file.`;
+  const r = await api("GET", "app/phones" + (admin ? "?all=1" : "")).catch(() => null);
+  if (!r) return;
+  const when = (t) => t ? new Date(t).toLocaleString([], { dateStyle: "medium", timeStyle: "short" }) : "never";
+  $("#app-phones").replaceChildren(...(r.phones.length ? [
+    h("p", { class: "muted" }, admin ? "Paired phones (everyone's)" : "Your paired phones"),
+    ...r.phones.map((p) => h("div", { class: "row-right" }, [
+      h("span", {}, `${p.name}${admin ? ` (${p.username})` : ""} · paired ${when(p.created_at)} · last seen ${when(p.last_seen)}`), " ",
+      h("button", { onclick: () => guarded(async () => {
+        if (!confirm(`Remove ${p.name}? It will stop getting BUNKR notifications and will have to pair again.`)) return;
+        await api("DELETE", `app/phones/${p.id}`); toast("Phone removed"); loadPhones();
+      }) }, "Remove")]))] : []));
+}
+$("#app-pair").addEventListener("click", () => guarded(async () => {
+  const r = await api("POST", "app/code");
+  $("#app-qr").replaceChildren(new DOMParser().parseFromString(r.svg, "image/svg+xml").documentElement);   // our own QR encoder
+  $("#app-code").textContent = r.code;
+  $("#app-code-note").textContent = `Good for ${r.minutes} minutes.`;
+  $("#app-pair-box").hidden = false;
 }));
 $("#push-prefs").addEventListener("submit", (e) => {
   e.preventDefault();
@@ -1110,9 +1354,7 @@ function showNewsView(v) {
   $("#news-feed-view").hidden = v !== "feed";
   $("#news-map-view").hidden = v !== "map";
   $("#news-brief-view").hidden = v !== "brief";
-  $("#news-chatter-view").hidden = v !== "chatter";
   try { localStorage.setItem("bunkr-news-view", v); } catch {}
-  if (v === "chatter") loadChatter();
   if (v === "feed") loadNews();
   if (v === "map") loadNewsMap();
   if (v === "brief") loadBrief();
@@ -1121,25 +1363,8 @@ $(".news-views").addEventListener("click", (e) => { const b = e.target.closest("
 function loadNewsTab() {
   let v = "feed";
   try { v = localStorage.getItem("bunkr-news-view") || v; } catch {}
-  showNewsView(["feed", "map", "brief", "chatter"].includes(v) ? v : "feed");
+  showNewsView(["feed", "map", "brief"].includes(v) ? v : "feed");
 }
-/* ---------- unconfirmed: public posts about the family's towns ---------- */
-async function loadChatter() {
-  const r = await guarded(() => api("GET", "news/chatter"));
-  if (!r) return;
-  $("#chatter-places").textContent = r.places.length ? `Watching: ${r.places.join(" · ")}.`
-    : "No family towns yet: add addresses on Sites & alerts (with who lives there), or towns in Local watch there.";
-  const src = (p) => p.source === "reddit" ? p.channel : "Bluesky";
-  $("#chatter-list").replaceChildren(...(r.posts.length ? r.posts.map((p) => h("article", { class: "card chatter" + (p.story ? " reported" : "") },
-    h("div", { class: "story-meta" }, h("span", { class: "tag" }, p.place), h("span", { class: "tag warn" }, p.alarm),
-      p.story ? h("span", { class: "tag ok" }, "Now reported" + (p.reported_by ? ` by ${p.reported_by}` : "")) : h("span", { class: "tag" }, "Unconfirmed")),
-    h("p", { class: "chatter-text" }, p.text),
-    h("div", { class: "muted" }, `${src(p)} · ${p.author || "someone"} · ${sinceIso(p.at)} · `,
-      h("a", { href: p.url, target: "_blank", rel: "noopener" }, "open"),
-      p.story ? [" · ", h("span", {}, p.story_headline)] : null)))
-    : [h("div", { class: "card" }, h("p", { class: "muted" }, "Nothing right now. Posts show up here when someone names a family town and mentions trouble."))]));
-}
-
 const areaName = (a) => (NEWS.data ? Object.fromEntries(NEWS.data.areas) : {})[a] || a;
 const topicName = (t) => (NEWS.data ? Object.fromEntries(NEWS.data.topics) : {})[t] || t;
 function storyCard(s) {
@@ -1168,20 +1393,24 @@ function storyCard(s) {
       h("ul", { class: "plain story-srcs" }, ...(s.items || []).map((i) => h("li", {},
         h("a", { href: i.url, target: "_blank", rel: "noopener", onclick: markRead }, i.title),
         h("div", { class: "muted" }, label(i.outlet), O[i.outlet] && STATE_OWNERS_N.includes(O[i.outlet].owner) ? h("span", { class: "tag state" }, "state media") : null,
-          (s.items || []).length > 1 ? [" · ", flagButton({ kind: "feed", story: s.id, url: i.url }, i.title, s.headline, () => loadNews())] : null))))));
+          (s.items || []).length > 1 ? [" · ", flagButton({ kind: "feed", story: s.id, url: i.url }, i.title, s.headline, (li) => {
+            s.items = s.items.filter((x) => x !== i); li.remove();
+            if (s.items.length < 2) $$(".flag-btn", card).forEach((b) => b.remove());
+          })] : null))))));
   return card;
 }
 // "This source doesn't belong to this story": it comes out at once; an admin reviews the flag
 function flagButton(target, sourceTitle, storyTitle, after) {
   return h("button", { type: "button", class: "link flag-btn", title: "This source is about something else",
-    onclick: () => {
+    onclick: (e) => {
+      const li = e.target.closest("li");
       const note = prompt(`Take this out of "${storyTitle}"?\n\n"${sourceTitle}"\n\nWhat's wrong? (optional)`, "");
       if (note === null) return;
       guarded(async () => {
         const r = await api("POST", "news/flags", { ...target, note });
         const where = r.moved_to && r.moved_to !== sourceTitle ? ` Moved to "${r.moved_to.slice(0, 70)}".` : " It's now a story of its own.";
         toast((r.reviewed ? "Taken out. BUNKR will match more carefully." : "Taken out, and sent for review. Thanks.") + where);
-        after && after();
+        after && after(li);
       });
     } }, "Doesn't belong");
 }
@@ -1190,15 +1419,17 @@ async function loadNewsFlags() {
   if (!isAdmin()) { box.hidden = true; return; }
   const r = await api("GET", "news/flags").catch(() => null);
   const open = r ? r.flags.filter((f) => f.status === "open") : [];
-  const done = r ? r.flags.filter((f) => f.status === "confirmed" && f.kind === "feed").slice(0, 5) : [];
+  const done = r ? r.flags.filter((f) => f.status === "confirmed" && f.kind === "feed" && !f.cleared).slice(0, 5) : [];
   box.hidden = !open.length && !done.length;
   if (box.hidden) return;
   const decide = (f, decision) => guarded(async () => { await api("POST", "news/flags/" + f.id, { decision });
-    toast(decision === "confirm" ? "Confirmed. BUNKR will keep these apart." : decision === "undo" ? "Undone: put back, and the lesson forgotten." : "Put back.");
-    loadNewsFlags(); loadNews(); });
+    if (decision !== "clear") toast(decision === "confirm" ? "Confirmed. BUNKR will keep these apart." : decision === "undo" ? "Undone: put back, and the lesson forgotten." : "Put back.");
+    loadNewsFlags(); if (decision !== "clear") loadNews(); });
+  const clearAll = () => guarded(async () => { for (const f of done) await api("POST", "news/flags/" + f.id, { decision: "clear" }); loadNewsFlags(); });
   const taught = (f) => f.apart ? h("div", { class: "muted" }, `Keeps apart: ${f.apart[0].join(", ")} | ${f.apart[1].join(", ")}`) : null;
-  box.replaceChildren(h("h2", {}, open.length ? `Flagged sources to review (${open.length})` : "News flags"),
-    h("p", { class: "muted" }, "Someone said a source isn't about its story. It's already out of the story; confirm, or put it back."),
+  box.classList.toggle("quiet", !open.length);
+  box.replaceChildren(open.length ? h("h2", {}, `Flagged sources to review (${open.length})`) : null,
+    open.length ? h("p", { class: "muted" }, "Someone said a source isn't about its story. It's already out of the story; confirm, or put it back.") : null,
     h("ul", { class: "plain flag-list" }, ...open.map((f) => h("li", {},
       h("div", {}, h("span", { class: "muted" }, f.kind === "brief" ? `Morning brief ${f.day}: ` : "Story: "), h("strong", {}, f.story_title)),
       h("div", {}, h("span", { class: "muted" }, "Source: "), h("a", { href: f.url, target: "_blank", rel: "noopener" }, f.source_title || f.url),
@@ -1208,9 +1439,12 @@ async function loadNewsFlags() {
       h("div", { class: "row gap" }, h("button", { class: "primary", onclick: () => decide(f, "confirm") }, "Right, it doesn't belong"),
         h("button", { onclick: () => decide(f, "dismiss") }, "It's fine, put it back"))))),
     done.length ? h("details", {}, h("summary", {}, `What BUNKR learned from flags (${done.length} recent)`),
+      h("p", { class: "muted" }, "BUNKR keeps what it learned. Clear takes it off this list; Undo forgets it and puts the source back."),
       h("ul", { class: "plain flag-list" }, ...done.map((f) => h("li", {},
         h("div", {}, h("strong", {}, f.source_title), h("span", { class: "muted" }, " isn't about "), h("strong", {}, f.story_title)),
-        taught(f), h("button", { class: "link", onclick: () => decide(f, "undo") }, "Undo"))))) : null);
+        taught(f), h("div", { class: "row gap" }, h("button", { class: "small", onclick: () => decide(f, "clear") }, "Clear"),
+          h("button", { class: "link", onclick: () => decide(f, "undo") }, "Undo"))))),
+      h("button", { class: "small", onclick: clearAll }, "Clear all")) : null);
 }
 async function loadNews(more = false) {
   if (!more) NEWS.offset = 0;
@@ -1248,8 +1482,33 @@ $("#news-allread").addEventListener("click", () => guarded(async () => {
   if (!ids.length) return toast("Nothing unread here");
   await api("POST", "news/read", { ids }); toast(`Marked ${ids.length} read`); loadNews();
 }));
+// Outlets grouped by region: a box per region (all its outlets) and, inside, a box per outlet.
+function sourceGroups(list, { checked, disabled = () => false, note = () => "" }) {
+  const regions = [...new Set(list.map((o) => o.region))];
+  return regions.map((region) => {
+    const outlets = list.filter((o) => o.region === region);
+    const boxes = outlets.map((o) => h("input", { type: "checkbox", name: "outlet", value: o.key, checked: checked(o), disabled: disabled(o) }));
+    const all = h("input", { type: "checkbox", "aria-label": "All of " + region });
+    const sync = () => {
+      const live = boxes.filter((b) => !b.disabled), on = live.filter((b) => b.checked).length;
+      all.checked = live.length > 0 && on === live.length; all.indeterminate = on > 0 && on < live.length; all.disabled = !live.length;
+      count.textContent = `${on} of ${live.length}`;
+    };
+    const count = h("span", { class: "muted src-count" });
+    all.addEventListener("change", () => { boxes.forEach((b) => { if (!b.disabled) b.checked = all.checked; }); sync(); });
+    boxes.forEach((b) => b.addEventListener("change", sync));
+    const d = h("details", { class: "src-region" },
+      h("summary", {}, h("label", { class: "check", onclick: (e) => e.stopPropagation() }, all, region), count),
+      ...outlets.map((o, i) => h("label", { class: "check src-outlet" }, boxes[i], h("span", {}, o.name,
+        h("span", { class: "muted" }, ` · ${o.country}, ${o.owner}` + (note(o) ? ` · ${note(o)}` : ""))))));
+    sync();
+    return d;
+  });
+}
 $("#news-prefs-btn").addEventListener("click", () => guarded(async () => {
-  const p = await api("GET", "me/news"), d = NEWS.data;
+  const [p, src] = await Promise.all([api("GET", "me/news"), api("GET", "news/sources")]), d = NEWS.data;
+  $("#news-prefs-sources").replaceChildren(...sourceGroups(src.sources, { checked: (o) => o.fetched && !o.hidden,
+    disabled: (o) => !o.fetched, note: (o) => o.fetched ? "" : "off for everyone" }));
   $("#news-prefs-areas").replaceChildren(...d.areas.map(([a, name]) => h("label", { class: "check" },
     h("input", { type: "checkbox", name: "area", value: a, checked: p.areas.includes(a) }), name)));
   $("#news-prefs-topics").replaceChildren(...d.topics.map(([t, name]) => h("label", { class: "check" },
@@ -1265,7 +1524,8 @@ $("#news-prefs-form").addEventListener("submit", (e) => {
   const muted = $$("input[name=topic]", f).filter((x) => !x.checked).map((x) => x.value);
   if (!areas.length) return toast("Follow at least one place", true);
   const watch = f.watch.value.split("\n").map((w) => w.trim()).filter(Boolean);
-  guarded(async () => { await api("POST", "me/news", { areas, muted_topics: muted, watch }); $("#news-prefs-dialog").close();
+  const muted_outlets = $$("#news-prefs-sources input[name=outlet]").filter((x) => !x.checked && !x.disabled).map((x) => x.value);
+  guarded(async () => { await api("POST", "me/news", { areas, muted_topics: muted, muted_outlets, watch }); $("#news-prefs-dialog").close();
     NEWS.area = ""; toast("Saved"); loadNews(); NEWS.mapSvg && loadNewsMap(); });
 });
 
@@ -1360,6 +1620,17 @@ $("#brief-openall").addEventListener("click", () => {
   $("#brief-openall").textContent = open ? "Close all" : "Open all";
 });
 const STATE_OWNERS = ["state-run", "state-funded", "state-owned", "state-aligned", "close to the state", "government-linked"];
+function briefActs(b, kind, index) {
+  const send = (action, said) => guarded(async () => {
+    await api("POST", "brief/feedback", { day: b.day, kind, index, action });
+    toast(said);
+    loadBrief(b.day);
+  });
+  return h("p", { class: "story-acts" },
+    h("button", { type: "button", class: "small", title: "Hide this story. BUNKR won't avoid the subject.", onclick: () => send("done", "Hidden from your brief.") }, "Done with this"),
+    " ",
+    h("button", { type: "button", class: "small", title: "Hide it and show you less like it", onclick: () => send("not_for_me", "Hidden. You'll see less like it.") }, "Not for me"));
+}
 async function loadBrief(day) {
   const r = await guarded(() => api("GET", "brief" + (day ? "?day=" + encodeURIComponent(day) : "")));
   if (!r) return;
@@ -1392,8 +1663,11 @@ async function loadBrief(day) {
     : [h("p", { class: "muted" }, "Nothing near you.")]));
   if (b.ai) {
     const openAll = briefOpen();
-    $("#brief-stories").replaceChildren(...b.ai.stories.map((s, si) => h("article", { class: "card story" },
+    const kept = b.ai.stories.map((s, i) => [s, s.index ?? i]);
+    if (!kept.length) $("#brief-stories").replaceChildren(h("div", { class: "card" }, h("p", { class: "muted" }, "You've cleared today's stories.")));
+    else $("#brief-stories").replaceChildren(...kept.map(([s, si]) => h("article", { class: "card story" },
       h("h2", {}, s.title),
+      briefActs(b, "ai", si),
       s.matters ? h("p", { class: "for-us" }, h("b", {}, "For us: "), s.matters) : null,
       s.agree ? h("p", { class: "agree", title: "What everyone agrees on" }, s.agree) : null,
       s.differ.length || s.unconfirmed || s.sources.length ? h("details", { class: "story-more", open: openAll },
@@ -1403,11 +1677,16 @@ async function loadBrief(day) {
         s.unconfirmed ? h("p", { class: "unconfirmed" }, h("b", {}, "Not confirmed: "), s.unconfirmed) : null,
         s.sources.length ? h("ul", { class: "plain brief-srcs" }, ...s.sources.map((src) => h("li", {}, chip(src),
           src.title ? h("span", { class: "muted" }, " " + src.title) : null,
-          s.sources.length > 1 ? [" ", flagButton({ kind: "brief", day: b.day, index: si, url: src.url }, src.title || src.url, s.title, () => loadBrief(b.day))] : null))) : null) : null)));
+          s.sources.length > 1 ? [" ", flagButton({ kind: "brief", day: b.day, index: si, url: src.url }, src.title || src.url, s.title, (li) => {
+            const list = li.parentElement;
+            s.sources = s.sources.filter((x) => x !== src); li.remove();
+            if (s.sources.length < 2 && list) $$(".flag-btn", list).forEach((x) => x.remove());
+          })] : null))) : null) : null)));
   } else {
     $("#brief-stories").replaceChildren(h("div", { class: "card" }, h("h2", {}, "Stories covered across regions"),
       h("p", { class: "muted" }, "Headlines grouped by story, widest coverage first. (No AI summary today" + (b.ai_error && isAdmin() ? `: ${b.ai_error}` : "") + ".)"),
-      ...b.groups.map((g) => h("details", { class: "sit-cat" }, h("summary", {}, g.headline, h("span", { class: "muted" }, ` · ${g.regions.length} regions`)),
+      ...b.groups.map((g, gi) => h("details", { class: "sit-cat" }, h("summary", {}, g.headline, h("span", { class: "muted" }, ` · ${g.regions.length} regions`)),
+        briefActs(b, "group", g.index ?? gi),
         h("ul", { class: "plain" }, ...g.items.map((i) => h("li", {}, h("a", { href: i.url, target: "_blank", rel: "noopener" }, i.title),
           h("span", { class: "muted" }, " · " + label(i.outlet)))))))));
   }
@@ -1436,7 +1715,7 @@ function sitItem(i, seen, big = false) {
   const where = [i.site && i.km != null ? (i.km === 0 ? `at ${i.site}` : `${i.km} km from ${i.site}`) : i.where_text,
     i.starts ? sinceIso(i.starts) : "", SIT.trust[i.trust] || i.trust].filter(Boolean).join(" · ");
   const lines = (i.summary || "").trim();
-  return h("div", { class: "sit-item" + (seen && i.first_seen > seen ? " new" : "") },
+  return h("div", { class: "sit-item" + (seen && i.first_seen > seen ? " new" : ""), "data-uid": i.uid },
     h("div", { class: "t" }, i.title),
     h("div", { class: "m" }, where),
     big && lines ? h("p", {}, lines) : lines ? h("details", {}, h("summary", { class: "m" }, "More"), h("p", {}, lines)) : null,
@@ -1464,9 +1743,15 @@ async function loadSituation() {
   const cats = Object.entries(r.categories).map(([k, label]) => [label, routine.filter((i) => i.category === k)]).filter(([, l]) => l.length);
   $("#sit-routine").replaceChildren(...(cats.length ? cats.map(([label, list]) => h("details", { class: "sit-cat" },
     h("summary", {}, `${label} (${list.length})`), ...list.map((i) => sitItem(i, seen)))) : [h("p", { class: "muted" }, "Quiet.")]));
+  // one line until opened: how many sources are working, and why the rest aren't
+  const bad = r.sources.filter((s) => s.ok === false), off = r.sources.filter((s) => s.needs_key && !s.at);
+  const why = [...new Set(bad.map((s) => plainError(s.error)))];
+  $("#sit-sources-sum").replaceChildren(h("strong", {}, "Sources"), " ", h("span", { class: bad.length ? "warn" : "muted" },
+    `${r.sources.length - bad.length - off.length} working` + (bad.length ? ` · ${bad.length} can't refresh` + (why.length === 1 ? ` (${why[0]})` : "") : "")
+    + (off.length ? ` · ${off.length} off` : "")));
   $("#sit-sources").replaceChildren(...r.sources.map((s) => h("li", {}, h("strong", {}, s.name), " ",
     s.needs_key && !s.at ? h("span", { class: "muted" }, "off: needs a free key") :
-    s.ok === false ? h("span", { class: "bad" }, `couldn't refresh (${s.error}); showing data from ${s.at ? sinceIso(s.at) : "never"}`)
+    s.ok === false ? h("span", { class: "bad" }, `couldn't refresh (${plainError(s.error)}); showing data from ${s.at ? sinceIso(s.at) : "never"}`)
       : s.at ? h("span", { class: "muted" }, `${sinceIso(s.at)} · ${s.count} item${s.count === 1 ? "" : "s"}`) : h("span", { class: "muted" }, "not checked yet"),
     s.key_label && isAdmin() && !["pi", "laptop"].includes(S.node_role) ? keyForm(s) : null)));
   if (sitView === "map") drawSitMap();
@@ -1644,7 +1929,7 @@ function renderReadiness() {
     $("#hazard-chips").replaceChildren(...(a.hazards.length ? a.hazards.map((z) =>
       h("span", { class: "chip lvl-" + z.level }, `${z.label}: ${z.rating}`)) : [h("span", { class: "muted" }, "No hazards rated moderate or higher.")]));
   } else {
-    $("#hazard-source").textContent = "Add your home on the Sites & alerts tab to tailor the checklist to local hazards.";
+    $("#hazard-source").textContent = "Add your home on Sites & maps to tailor the checklist to local hazards.";
     $("#hazard-chips").replaceChildren();
   }
 
@@ -1661,11 +1946,18 @@ function renderReadiness() {
 function locationOptions(withNone = true, withNew = false) {
   const opts = [];
   if (withNone) opts.push(h("option", { value: "" }, "No location"));
-  for (const l of S.locations) opts.push(h("option", { value: l.id }, `${l.name} (${S.location_kinds[l.kind].split(" (")[0]})`));
+  for (const l of S.locations) opts.push(h("option", { value: l.id }, locOptionText(l)));
   if (withNew) opts.push(h("option", { value: "__new" }, "New location…"));
   return opts;
 }
 
+// "Master bedroom (Home)", then "   └ Gun safe" under it: the nesting shows in every picker
+const locLeaf = (l) => l.label || l.name.split(" > ").pop();
+function locOptionText(l, withKind = true) {
+  const d = l.depth || 0;
+  return d ? "\u00a0\u00a0\u00a0".repeat(d) + "\u2514 " + locLeaf(l)
+    : l.name + (withKind ? ` (${S.location_kinds[l.kind].split(" (")[0]})` : "");
+}
 // an item is "in" a location if it's there or in any sub-location below it (names are full paths)
 function inLocation(item, locId) {
   const l = S.locations.find((x) => String(x.id) === locId);
@@ -1681,7 +1973,7 @@ function fillLocationSelects() {
   f.replaceChildren(h("option", { value: "" }, "All locations"), h("option", { value: "none" }, "No location"), ...locationOptions(false));
   if ([...f.options].some((o) => o.value === fk)) f.value = fk;
   const m = $("#move-target");
-  m.replaceChildren(h("option", { value: "" }, "to: no location"), ...S.locations.map((l) => h("option", { value: l.id }, "to: " + l.name)));
+  m.replaceChildren(h("option", { value: "" }, "to: no location"), ...S.locations.map((l) => h("option", { value: l.id }, (l.depth ? "" : "to: ") + locOptionText(l, false))));
 }
 $("#item-location").addEventListener("change", () => { $("#new-loc-label").hidden = $("#item-location").value !== "__new"; });
 
@@ -1760,6 +2052,7 @@ function resetItemForm() {
   f.reset();
   $("#item-form-title").textContent = "Add item";
   $("#item-cancel").hidden = true;
+  $("#item-delete").hidden = true;
   updateItemFormForCategory();
 }
 $("#item-cancel").addEventListener("click", () => { resetItemForm(); $("#add-card").classList.remove("open"); $("#add-open").setAttribute("aria-expanded", "false"); });
@@ -1787,8 +2080,18 @@ function editItem(item) {
   updateItemFormForCategory();
   $("#item-form-title").textContent = "Edit item";
   $("#item-cancel").hidden = false;
+  $("#item-delete").hidden = false;
   f.scrollIntoView({ behavior: "smooth" });
 }
+$("#item-delete").addEventListener("click", () => {
+  const item = S.items.find((i) => i.id === editingItem);
+  if (!item || !confirm(`Delete "${item.name}"?`)) return;
+  guarded(async () => {
+    await api("DELETE", "items/" + item.id);
+    resetItemForm(); $("#add-card").classList.remove("open"); $("#add-open").setAttribute("aria-expanded", "false");
+    toast("Deleted"); await refresh();
+  });
+});
 
 function startItemFor(gap, locationId = null, qty = null) {
   showTab("inventory");
@@ -1802,6 +2105,7 @@ function startItemFor(gap, locationId = null, qty = null) {
   updateItemFormForCategory();
   if (gap.id === "water") { f.unit.value = "jugs"; f.size_value.value = 1; f.size_unit.value = "gal"; }
   updateItemPreview();
+  f.scrollIntoView({ behavior: "smooth" });   // opens the folded form too
   f.name.focus();
 }
 
@@ -1820,6 +2124,65 @@ $("#item-form").addEventListener("submit", (e) => {
     await refresh();
   });
 });
+
+/* ---------- CSV import: guess the columns, preview, then save ---------- */
+const IMP = { csv: "", mapping: null, mode: "add", modes: {}, view: null };
+const IMP_MODES = { add: "Add quantity", overwrite: "Overwrite", new: "Add as new" };
+async function impPreview(askDups) {
+  const v = await api("POST", "items/import", { csv: IMP.csv, mapping: IMP.mapping });
+  IMP.view = v; IMP.mapping = v.mapping;
+  renderImport();
+  const dups = v.rows.filter((r) => r.dup).length;
+  if (askDups && dups) {
+    $("#imp-dup-msg").textContent = `${dups} row${dups === 1 ? " matches" : "s match"} something you already have.`;
+    $("#imp-dup-dialog").showModal();
+  }
+}
+function renderImport() {
+  const v = IMP.view, none = h("option", { value: "" }, "(skip)");
+  $("#imp-map").replaceChildren(...v.fields.map((f) => h("label", {}, v.labels[f],
+    h("select", { onchange: (e) => { IMP.mapping[f] = e.target.value === "" ? null : +e.target.value; guarded(() => impPreview(false)); } },
+      none.cloneNode(true), ...v.headers.map((c, i) => h("option", { value: i, selected: IMP.mapping[f] === i }, c || `Column ${i + 1}`))))));
+  const dups = v.rows.filter((r) => r.dup).length, bad = v.rows.filter((r) => r.problem).length;
+  $("#imp-dups").hidden = !dups;
+  $("#imp-dup-text").textContent = `${dups} duplicate${dups === 1 ? "" : "s"}. For all of them:`;
+  $("#imp-mode").value = IMP.mode;
+  const newLocs = new Set(v.rows.filter((r) => r.new_location).map((r) => r.location));
+  $("#imp-summary").textContent = `${v.rows.length - bad} row${v.rows.length - bad === 1 ? "" : "s"} ready` +
+    (bad ? `, ${bad} will be skipped` : "") + (newLocs.size ? `. New location${newLocs.size === 1 ? "" : "s"}: ${[...newLocs].join(", ")}` : "") +
+    (v.capped ? ". Only the first rows are read." : ".");
+  $("#imp-table").replaceChildren(
+    h("tr", {}, ...["Line", "Item", "Quantity", "Where", "Expires", ""].map((t) => h("th", {}, t))),
+    ...v.rows.map((r) => h("tr", {},
+      h("td", {}, r.n), h("td", {}, r.name), h("td", {}, `${r.quantity} ${r.unit}`.trim()),
+      h("td", {}, r.location + (r.new_location ? " (new)" : "")), h("td", {}, r.expires),
+      h("td", {}, r.problem ? h("span", { class: "muted" }, "Skipped: " + r.problem) : r.dup ?
+        h("select", { onchange: (e) => { IMP.modes[r.n] = e.target.value; } },
+          ...Object.entries(IMP_MODES).map(([k, t]) => h("option", { value: k, selected: (IMP.modes[r.n] || IMP.mode) === k }, "Duplicate: " + t))) : ""))));
+}
+$("#imp-file").addEventListener("change", (e) => {
+  const file = e.target.files[0]; e.target.value = "";
+  $("#imp-menu").open = false;
+  if (!file) return;
+  guarded(async () => {
+    IMP.csv = await file.text(); IMP.mapping = null; IMP.modes = {}; IMP.mode = "add";
+    await impPreview(true);
+    $("#imp-dialog").showModal();
+  });
+});
+$("#imp-dup-dialog").addEventListener("click", (e) => {
+  const m = e.target.closest("[data-dup]")?.dataset.dup;
+  if (!m) return;
+  IMP.mode = m; $("#imp-mode").value = m; $("#imp-dup-dialog").close(); renderImport();
+});
+$("#imp-mode").addEventListener("change", (e) => { IMP.mode = e.target.value; IMP.modes = {}; renderImport(); });
+$("#imp-cancel").addEventListener("click", () => $("#imp-dialog").close());
+$("#imp-go").addEventListener("click", () => guarded(async () => {
+  const r = await api("POST", "items/import", { csv: IMP.csv, mapping: IMP.mapping, mode: IMP.mode, modes: IMP.modes, confirm: true });
+  $("#imp-dialog").close();
+  toast(`Imported: ${r.added} new, ${r.summed} added to, ${r.overwritten} overwritten` + (r.problems.length ? `. Skipped ${r.problems.length}` : ""));
+  await refresh();
+}));
 
 /* ---------- fast entry: barcodes and pasted lists ---------- */
 let scanStream = null, scanTimer = null;
@@ -1951,7 +2314,9 @@ function renderInventory() {
     h("td", {}, fmtNum(m.loaded)), h("td", {}, m.service ? h("span", { class: "warn" }, fmtNum(m.service)) : "0"))));
   $("#inv-table tbody").replaceChildren(...(rows.length ? rows.map((i) => {
     const qty = i.qty_text || `${fmtNum(i.quantity)} ${i.unit}`;
-    return h("tr", { class: expired.has(i.id) ? "expired" : "" },
+    // tap a row to edit it (Delete is in the edit form); the checkbox still selects
+    return h("tr", { class: "tap" + (expired.has(i.id) ? " expired" : ""), title: "Tap to edit",
+      onclick: (e) => { if (!e.target.closest("input, button, a")) editItem(i); } },
       h("td", {}, h("input", { type: "checkbox", checked: selectedItems.has(i.id), "aria-label": "Select " + i.name,
         onchange: (e) => { e.target.checked ? selectedItems.add(i.id) : selectedItems.delete(i.id); updateMoveBar(); } })),
       h("td", {}, i.name, i.category === "firearms" && (i.caliber || i.serial || i.subtype) ? h("div", { class: "muted" },
@@ -1965,9 +2330,7 @@ function renderInventory() {
       h("td", { class: "c-loc" }, i.location), h("td", { class: "c-exp" }, i.expires),
       h("td", { class: "c-meta" }, [S.categories[i.category] || i.category, i.location && "\u{1F4CD}" + i.location,
         i.expires && "expires " + i.expires].filter(Boolean).join(" · ")),
-      h("td", { class: "c-act" }, h("button", { class: "link", onclick: () => editItem(i) }, "Edit"),
-        h("button", { class: "danger", onclick: () => confirm(`Delete "${i.name}"?`) &&
-          guarded(async () => { await api("DELETE", "items/" + i.id); await refresh(); }) }, "Delete")));
+      h("td", { class: "c-act" }, h("button", { class: "link", onclick: () => editItem(i) }, "Edit")));
   }) : [h("tr", {}, h("td", { colspan: 8, class: "muted" }, S.items.length ? "No matches." : "No items yet. Start with water and food."))]));
 }
 function updateMoveBar() {
@@ -2000,7 +2363,7 @@ function renderAlerts() {
       h("div", {}, a.headline),
       h("details", {}, h("summary", {}, "Details"), h("p", {}, a.description), a.instruction ? h("p", {}, h("strong", {}, "What to do: "), a.instruction) : null,
         h("p", { class: "muted" }, `${a.senderName} · as of ${when(a.fetched)}`)))),
-    ...stale.map((x) => h("p", { class: "muted" }, `${x.name}: couldn't refresh alerts (${x.alerts_error}); showing data as of ${when(x.alerts_at)}.`)));
+    ...stale.map((x) => h("p", { class: "muted" }, `${x.name}: couldn't refresh alerts (${plainError(x.alerts_error)}); showing data as of ${when(x.alerts_at)}.`)));
 }
 
 /* ---------- locations & kits ---------- */
@@ -2010,16 +2373,36 @@ function renderLocations() {
     $("#loc-kind").replaceChildren(...Object.entries(S.location_kinds).map(([k, v]) => h("option", { value: k }, v)));
   if (!editingLoc) fillParentSelect();
   const kitBy = Object.fromEntries(S.kits.map((k) => [k.location_id, k]));
-  $("#loc-table tbody").replaceChildren(...(S.locations.length ? S.locations.map((l) => {
-    const k = kitBy[l.id];
-    return h("tr", {},
-      h("td", {}, l.name, l.person ? h("div", { class: "muted" }, l.person) : null),
+  const kids = {}, total = {};
+  for (const l of S.locations) if (l.parent_id) (kids[l.parent_id] = kids[l.parent_id] || []).push(l);
+  const count = (l) => total[l.id] ?? (total[l.id] = l.item_count + (kids[l.id] || []).reduce((n, c) => n + count(c), 0));
+  let openLocs = new Set();
+  try { openLocs = new Set(JSON.parse(localStorage.getItem("bunkr-loc-open") || "[]")); } catch {}
+  const byId = Object.fromEntries(S.locations.map((l) => [l.id, l]));
+  const shown = (l) => { for (let p = byId[l.parent_id]; p; p = byId[p.parent_id]) if (!openLocs.has(p.id)) return false; return true; };
+  const toggle = (l) => {
+    openLocs.has(l.id) ? openLocs.delete(l.id) : openLocs.add(l.id);
+    try { localStorage.setItem("bunkr-loc-open", JSON.stringify([...openLocs])); } catch {}
+    renderLocations();
+  };
+  $("#loc-table tbody").replaceChildren(...(S.locations.length ? S.locations.filter(shown).map((l) => {
+    const k = kitBy[l.id], inside = kids[l.id] || [], d = l.depth || 0;
+    return h("tr", { class: "loc-d" + d + (inside.length ? " loc-parent" : "") },
+      h("td", {}, inside.length ? h("button", { type: "button", class: "loc-toggle", "aria-expanded": String(openLocs.has(l.id)),
+          "aria-label": (openLocs.has(l.id) ? "Hide" : "Show") + " what's inside " + locLeaf(l), onclick: () => toggle(l) },
+          openLocs.has(l.id) ? "\u25BE" : "\u25B8") : h("span", { class: "loc-toggle-gap" }),
+        d ? locLeaf(l) : l.name,
+        inside.length ? h("span", { class: "muted loc-inside" }, ` · ${inside.length} inside`) : null,
+        l.person ? h("div", { class: "muted" }, l.person) : null),
       h("td", {}, S.location_kinds[l.kind].split(" (")[0] + (k ? ` · ${l.people} ${l.people === 1 ? "person" : "people"}` : "")),
-      h("td", {}, l.item_count),
+      h("td", { "data-unit": count(l) === 1 ? " item" : " items" },
+        inside.length && count(l) !== l.item_count ? h("span", { title: `${l.item_count} here, the rest inside` }, count(l)) : l.item_count),
       h("td", {}, l.counts_home ? "Yes" : "No"),
-      h("td", {}, k ? h("span", { class: tone(k.score) }, k.score + "%") : "—"),
+      h("td", {}, k ? h("span", { class: tone(k.score) }, "Kit " + k.score + "% ready") : ""),
       h("td", {},
-        h("a", { class: "btn small", href: "/api/packing/" + l.id, target: "_blank", rel: "noopener" }, "Packing list"),
+        h("a", { href: "/api/packing/" + l.id, target: "_blank", rel: "noopener" }, "Packing list"),
+        h("a", { href: "/api/labels.html?ids=" + l.id, target: "_blank", rel: "noopener" }, "Label"),
+        "NDEFReader" in window ? h("button", { class: "link", onclick: () => writeNfc(l) }, "NFC tag") : null,
         h("button", { class: "link", onclick: () => editLocation(l) }, "Edit"),
         h("button", { class: "danger", onclick: () => confirm(`Delete location "${l.name}"? Its ${l.item_count} items are kept with no location.`) &&
           guarded(async () => { await api("DELETE", "locations/" + l.id); await refresh(); }) }, "Delete")));
@@ -2050,7 +2433,7 @@ function editLocation(l) {
 function fillParentSelect() {
   const sel = $("#loc-parent"), keep = sel.value;
   sel.replaceChildren(h("option", { value: "" }, "Nothing (top level)"),
-    ...S.locations.filter((l) => (l.depth || 0) < 2).map((l) => h("option", { value: l.id }, l.name)));
+    ...S.locations.filter((l) => (l.depth || 0) < 2).map((l) => h("option", { value: l.id }, locOptionText(l, false))));
   sel.value = keep;
 }
 function resetLocForm() {
@@ -2091,6 +2474,48 @@ function renderShopping() {
     : [h("tr", {}, h("td", { colspan: 4, class: "muted" }, "Nothing to buy: every target is met."))]));
 }
 
+// Android Chrome can write an NFC sticker itself; iPhones read them but can't write from a web page (use NFC Tools).
+async function writeNfc(l) {
+  const link = `${S.label_base || location.origin}/#bin-${l.uid}`;
+  toast(`Hold the sticker to the back of the phone to write "${l.name}"…`);
+  try {
+    await new NDEFReader().write({ records: [{ recordType: "url", data: link }] });
+    toast(`Written: tapping it opens ${l.name}.`);
+  } catch (e) { toast("Couldn't write the tag: " + (e.message || e), true); }
+}
+
+/* ---------- the home weather station (admin, Sites & maps) ---------- */
+async function loadStation() {
+  const card = $("#station-card");
+  card.hidden = !(S.preview || []).includes("weather_station") || !isAdmin() || ["pi", "laptop"].includes(S.node_role);
+  if (card.hidden) return;
+  const r = await api("GET", "station").catch(() => null);
+  if (!r) return;
+  const act = (action, ask) => () => (!ask || confirm(ask)) && guarded(async () => { await api("POST", "station", { action }); loadStation(); });
+  if (!r.set_up) {
+    $("#station-body").replaceChildren(h("p", {}, "No station yet. Setting one up gives it a private address to send readings to."),
+      h("button", { class: "primary", onclick: act("new_key") }, "Set up a station"));
+    return;
+  }
+  const u = new URL(r.url), last = r.last;
+  $("#station-body").replaceChildren(
+    h("p", {}, last ? [h("strong", {}, "Last reading "), sinceIso(last.at), ": ", [last.temp_f != null ? `${Math.round(last.temp_f)}°F` : "",
+      last.humidity != null ? `${Math.round(last.humidity)}%` : "", last.pressure_hpa != null ? `${Math.round(last.pressure_hpa)} hPa` : "",
+      last.wind_mph != null ? `wind ${Math.round(last.wind_mph)} mph` : ""].filter(Boolean).join(", "), ` · ${r.history.length} in the last day`]
+      : "Waiting for the first reading."),
+    h("details", { open: !last }, h("summary", {}, "How to point a station here"),
+      h("p", {}, h("strong", {}, "A station you build"), " posts JSON to ", h("code", {}, r.url), ", like ",
+        h("code", {}, '{"temp_f": 41.2, "humidity": 63, "pressure_hpa": 1012.4, "wind_mph": 8, "gust_mph": 15, "wind_dir": 315, "rain_day_in": 0.12}'),
+        ". Every 1 to 5 minutes is plenty."),
+      h("p", {}, h("strong", {}, "Ecowitt and most bought stations: "), "in the station's app, \"Customized\" upload, protocol Wunderground (or Ecowitt), ",
+        `server ${u.hostname}, port ${u.port || (u.protocol === "https:" ? 443 : 80)}, path `, h("code", {}, u.pathname + "?"),
+        ", station ID and key anything. Use the hub's address on your home network, so it works when the internet doesn't."),
+      h("p", { class: "muted" }, "The address is the station's password: keep it private. A new one stops the old one working."),
+      h("p", { class: "muted" }, "If the hub's firewall only lets listed devices reach BUNKR (deploy/firewall.nft), add the station's IP address to that list.")),
+    h("p", {}, h("button", { class: "small", onclick: act("new_key", "Make a new address? The station stops sending until you change it there too.") }, "New address"),
+      " ", h("button", { class: "link danger", onclick: act("forget", "Remove the station? Its readings stay until they age out.") }, "Remove")));
+}
+
 /* ---------- sites ---------- */
 let editingSite = null;
 function renderSites() {
@@ -2109,7 +2534,7 @@ function renderSites() {
       h("p", { class: "muted" }, [x.address, x.lat != null ? `${x.lat.toFixed(4)}, ${x.lon.toFixed(4)}` : "no coordinates",
         x.county_name].filter(Boolean).join(" · ")),
       h("p", {}, x.alerts.length ? h("span", { class: "bad" }, `${x.alerts.length} active alert(s): ${x.alerts.map((a) => a.event).join(", ")}`) : "No active weather alerts.",
-        h("span", { class: "muted" }, ` As of ${when(x.alerts_at)}.`), x.alerts_error ? h("span", { class: "warn" }, ` Last refresh failed: ${x.alerts_error}`) : null),
+        h("span", { class: "muted" }, ` As of ${when(x.alerts_at)}.`), x.alerts_error ? h("span", { class: "warn" }, ` Last refresh failed: ${plainError(x.alerts_error)}`) : null),
       ratings.length ? h("details", {}, h("summary", {}, `Hazard ratings (FEMA NRI${x.hazards.overall ? ", overall " + x.hazards.overall : ""})`),
         h("table", { class: "hz-table" }, h("tbody", {}, ratings.map(([c, r]) =>
           h("tr", {}, h("td", {}, S.hazard_names[c]), h("td", { class: "lvl-" + LEVEL[r] }, r))))))
@@ -2265,12 +2690,14 @@ function renderLibraries() {
     out.push(h("label", { class: "lib" },
       h("input", { type: "checkbox", checked: !disabled.has(l.id), onchange: (e) => toggleLib(l.id, e.target.checked) }),
       h("div", {}, h("div", {}, l.why),
-        h("div", { class: "l-sub" }, l.online ? `${l.file} · ${l.date}` : `estimate only (${l.error || "offline"})`)),
+        l.online ? h("div", { class: "l-sub" }, `${l.file} · ${l.date}`) : null),
       h("span", { class: "num" }, (l.online ? "" : "~") + gb(l.size))));
   }
   out.push(h("div", { class: "tier" }, "Readers (always included)"));
   for (const t of libraries.tools)
     out.push(h("div", { class: "lib" }, h("span", {}), h("div", {}, t.why), h("span", { class: "num" }, gb(t.size))));
+  const est = libraries.libraries.find((l) => !l.online);
+  if (est) out.unshift(h("p", { class: "muted" }, `Sizes marked ~ are estimates (${est.error ? plainError(est.error) : "offline"}).`));
   $("#lib-list").replaceChildren(...out);
 }
 
@@ -2586,7 +3013,7 @@ function renderReader() {
   $("#reader-status").textContent = r.running
     ? `Running${r.books ? ` with ${r.books} book${r.books === 1 ? "" : "s"}` : ""} at ${lib.url || "port 8080"}. Everyone can search it from Home.`
       + (r.skipped && r.skipped.length ? ` Skipped (still copying or damaged): ${r.skipped.join(", ")}.` : "")
-    : r.error ? `Not running: ${r.error}` : "Not running yet: fetch a library below and it starts by itself within a minute.";
+    : r.error ? `Not running: ${plainError(r.error)}` : "Not running yet: fetch a library below and it starts by itself within a minute.";
   const extra = D.extra_books || [];
   $("#books-added").replaceChildren(...(extra.length ? [h("h3", {}, "Books you added"), h("ul", { class: "plain" }, ...extra.map((e) =>
     h("li", {}, e.why, " ", h("button", { class: "link", onclick: () => guarded(async () => {
@@ -2626,7 +3053,7 @@ async function loadPacks() {
   renderPacks();
 }
 const packStatus = (st) => st.status === "ok" ? h("span", { class: "good" }, `ok${st.version ? " · " + st.version : ""}${st.size ? " · " + gb(st.size) : ""}`)
-  : st.status === "error" ? h("span", { class: "bad" }, "failed: " + st.error) : h("span", { class: "muted" }, "not fetched yet");
+  : st.status === "error" ? h("span", { class: "bad" }, "failed: " + plainError(st.error)) : h("span", { class: "muted" }, "not fetched yet");
 function packItemLabel(i) {
   if (i.type === "url") return i.label || i.file;
   if (i.type === "zim") return i.label || `Kiwix book ${i.name}${i.flavour ? " (" + i.flavour + ")" : ""}`;
@@ -2677,7 +3104,7 @@ function renderPacks() {
   const st = P.os.status;
   $("#os-status").textContent = !st ? "Not fetched yet." : st.ok
     ? `Last fetched ${when(st.at)} for ${st.system}: ${st.files} packages.` + (st.missing && st.missing.length ? ` Not found: ${st.missing.join(", ")}.` : "")
-    : `Last fetch failed ${when(st.at)}: ${st.error}`;
+    : `Last fetch failed ${when(st.at)}: ${plainError(st.error)}`;
   const sf = $("#packs-settings-form");
   sf.max_item_gb.value = P.settings.max_item_gb; sf.allow_lan.checked = P.settings.allow_lan;
 }
@@ -2761,7 +3188,7 @@ function renderMeshKit() {
   $("#meshkit-status").replaceChildren(!st.checked_at ? h("span", { class: "muted" }, "Not fetched yet: it runs at 4 a.m., or tick it in the Catalog and fetch.")
     : st.ok ? h("span", {}, `Version ${st.version}: ${st.firmware_files} firmware files (${(st.releases || []).join(", ")}), ${st.wheels} Python packages · ${sinceIso(st.checked_at)}`,
         st.wheels_note ? h("span", { class: "warn" }, " " + st.wheels_note) : "")
-    : h("span", { class: "bad" }, `Last refresh failed ${sinceIso(st.checked_at)}: ${st.error}.` + (st.last_good ? ` The copy from ${sinceIso(st.last_good)} is still there.` : "")));
+    : h("span", { class: "bad" }, `Last refresh failed ${sinceIso(st.checked_at)}: ${plainError(st.error)}.` + (st.last_good ? ` The copy from ${sinceIso(st.last_good)} is still there.` : "")));
   $("#meshkit-boards").replaceChildren(...Object.entries(m.boards_all).map(([id, label]) =>
     h("label", { class: "check" }, h("input", { type: "checkbox", name: "board", value: id, checked: m.boards.includes(id) }), " " + label)));
 }
@@ -2833,13 +3260,26 @@ async function pollDepot() {
 const isAdmin = () => S.me.role === "admin";
 function renderSession() {
   $("#userbox").hidden = !S.require_login;
+  $("#demo-bar").hidden = !S.demo;
+  // what isn't set up stays out of the everyday screens; admins find it under Setup
+  const F = S.features || {};
+  $("#mesh-card").hidden = !F.mesh;
+  $("#tabs [data-tab=radios]").hidden = !isAdmin() && !F.mesh && !F.radios;
   $("#whoami").textContent = `${S.me.username} (${S.me.role})`;
   $$("#tabs [data-admin]").forEach((b) => (b.hidden = !isAdmin()));
   if (S.view === "simple") $$("#tabs button").forEach((b) => { if (!SIMPLE_TABS.includes(b.dataset.tab)) b.hidden = true; });
   $("#view-toggle").textContent = S.view === "simple" ? "All screens" : "Simple view";
   $("#view-toggle").hidden = !S.me_person && !isAdmin() && S.view === "full";
+  // on phones the account links live at the bottom of the menu, so the title bar stays one short row
+  $("#drawer-account").hidden = !S.require_login;
+  $("#drawer-who").textContent = `${S.me.username} (${S.me.role})`;
+  $("#drawer-view").textContent = $("#view-toggle").textContent;
+  $("#drawer-view").hidden = $("#view-toggle").hidden;
   $$("[data-admin-field]").forEach((el) => (el.hidden = !isAdmin()));
   $("#mypw-card").hidden = !S.require_login;
+  $("#push-card").hidden = !S.require_login || !S.me.id;
+  $("#menu-account").textContent = (S.me_person && S.me_person.name) || S.me.username || "My account";
+  renderAccount();
   $("#users-card").hidden = !(S.require_login && isAdmin());
   const field = ["pi", "laptop"].includes(S.node_role);
   if (field) { $("#tabs [data-tab=nodes]").hidden = true; $("#tabs [data-tab=downloads]").hidden = true; }
@@ -2862,11 +3302,24 @@ function renderSession() {
       h("a", { class: "btn", href: "/api/shopping.html", target: "_blank", rel: "noopener" }, "Shopping list"));
   }
 }
+// My account: who this login is, and the settings that belong to one person (notifications, password, two-step login).
+function renderAccount() {
+  const p = S.me_person;
+  $("#me-person-name").textContent = p ? p.name : "Not linked to a person";
+  $("#me-person-call").textContent = p && p.callsigns && p.callsigns.length ? p.callsigns.join(", ") : "None";
+  $("#me-login").textContent = `${S.me.username || "this device"}${S.me.role ? " (" + S.me.role + ")" : ""}`;
+  $("#me-unlinked").hidden = !!p;
+  $("#me-unlinked").textContent = isAdmin() ? "Link this login to a person on the Family tab." : "Ask an admin to link this login to you on the Family tab.";
+  $("#account-logout").hidden = !S.require_login;
+}
+$("#account-logout").addEventListener("click", () => $("#logout").click());
 $("#view-toggle").addEventListener("click", () => guarded(async () => {
   await api("POST", "me/view", { view: S.view === "simple" ? "full" : "simple" }); await refresh();
   if ($(`#tabs [data-tab="${localStorage.getItem("bunkr-tab")}"]`)?.hidden) showTab("home");
 }));
 $("#logout").addEventListener("click", () => guarded(async () => { await api("POST", "logout"); forgetSaved(); location.href = "/login.html?out=1"; }));
+$("#drawer-view").addEventListener("click", () => { closeMenu(); $("#view-toggle").click(); });
+$("#drawer-logout").addEventListener("click", () => $("#logout").click());
 $("#mypw-form").addEventListener("submit", (e) => {
   e.preventDefault();
   const f = e.target;
@@ -3043,6 +3496,8 @@ async function loadRadio() {
     $("#ch-service").replaceChildren(...Object.entries(R.services).map(([k, v]) => h("option", { value: k }, v)));
     $("#radio-profile").append(...Object.entries(R.profiles).map(([k, v]) => h("option", { value: k }, v.label)));
   }
+  radioFormHome(); editingRadio = null; $("#radio-cancel").hidden = true;
+  $("#radio-location").replaceChildren(h("option", { value: "" }, "Not set"), ...locationOptions(false));
   renderRadios(); renderChannels(); renderFirmware();
 }
 const txText = (c) => c.duplex === "off" ? "RX only" : c.duplex === "+" ? (c.rx_mhz + c.offset_mhz).toFixed(4)
@@ -3085,10 +3540,12 @@ function renderRadios() {
           prof ? h("a", { class: "btn small", href: `/api/radios/${r.id}/file` }, prof.format === "adms" ? "ADMS-12 file" : "CHIRP file")
             : h("a", { class: "btn small", href: `/api/radios/${r.id}/chirp.csv`, download: `${r.name}-chirp.csv` }, "CHIRP file"),
           h("a", { class: "btn small", href: `/api/radios/${r.id}/card.html`, target: "_blank", rel: "noopener" }, "Channel card"),
-          h("button", { class: "link", onclick: () => editRadio(r) }, "Edit"),
+          h("button", { class: "link", onclick: (e) => editRadio(r, e.target.closest(".card")) }, "Edit"),
           h("button", { class: "danger", onclick: () => confirm(`Remove radio ${r.name}? Saved images stay in the store.`) &&
             guarded(async () => { await api("DELETE", "radios/" + r.id); loadRadio(); }) }, "Remove"))),
-      h("p", { class: "muted" }, [r.owner && "Carried by " + r.owner, r.model, r.chirp_driver && "CHIRP: " + r.chirp_driver, r.notes].filter(Boolean).join(" · ")),
+      h("p", { class: "muted" }, [r.owner && "Carried by " + r.owner,
+        r.location_id && (S.locations.find((l) => l.id === r.location_id) || {}).name && "Kept at " + S.locations.find((l) => l.id === r.location_id).name,
+        r.model, r.chirp_driver && "CHIRP: " + r.chirp_driver, r.notes].filter(Boolean).join(" · ")),
       r.kind === "hf" ? h("p", { class: "muted" }, "HF radio: no memory channels here. Digital-mode settings live with JS8Call, fldigi and Pat on the Pi and laptop.") : (planBox || editor),
       isAdmin() ? h("details", {}, h("summary", {}, `Programming images (${r.images.length})`),
         h("p", { class: "muted" }, "In CHIRP, download from the radio and save the .img file, then add it here. Every version is kept."),
@@ -3097,22 +3554,34 @@ function renderRadios() {
           h("a", { href: "/store/" + im.path }, im.path.split("/").pop()), h("span", { class: "num" }, gb(im.size)))))) : null);
   }) : [h("p", { class: "muted" }, "No radios yet. Add one above; it starts with the standard channels for its service.")]));
 }
-function editRadio(r) {
+// Edit opens the form inside that radio's card; Save or Cancel puts it back under "Add a radio".
+const RADIO_FORM_HOME = $("#radio-form").parentElement;
+function radioFormHome() {
+  const f = $("#radio-form");
+  if (f.parentElement !== RADIO_FORM_HOME) RADIO_FORM_HOME.append(f);
+  f.closest(".card")?.classList.remove("editing");
+}
+function editRadio(r, card) {
   editingRadio = r.id;
   const f = $("#radio-form");
   for (const k of ["name", "model", "kind", "service", "chirp_driver", "notes", "profile", "owner"]) f[k].value = r[k] || "";
-  $("#radio-cancel").hidden = false; f.scrollIntoView({ behavior: "smooth" });
+  f.location_id.value = r.location_id ?? "";
+  $("#radio-cancel").hidden = false;
+  if (card) { card.querySelector(".row").after(f); card.classList.add("editing"); f.name.focus(); }
+  else f.scrollIntoView({ behavior: "smooth" });
 }
-$("#radio-cancel").addEventListener("click", () => { editingRadio = null; $("#radio-form").reset(); $("#radio-cancel").hidden = true; });
+$("#radio-cancel").addEventListener("click", () => { editingRadio = null; $("#radio-form").reset(); $("#radio-cancel").hidden = true; radioFormHome(); });
 $("#radio-form").addEventListener("submit", (e) => {
   e.preventDefault();
   guarded(async () => {
     await api("POST", "radios" + (editingRadio ? "/" + editingRadio : ""), Object.fromEntries(new FormData(e.target)));
-    toast("Radio saved"); editingRadio = null; e.target.reset(); $("#radio-cancel").hidden = true; loadRadio();
+    toast("Radio saved"); editingRadio = null; e.target.reset(); $("#radio-cancel").hidden = true; radioFormHome(); loadRadio();
   });
 });
 function renderChannels() {
   const statewide = $("#ch-statewide").checked;
+  const local = R.channels.filter((c) => c.slot == null || c.slot < 200).length;
+  $("#ch-list-sum").textContent = `Channel list (${local}` + (R.channels.length > local ? `, plus ${R.channels.length - local} statewide)` : ")");
   const list = R.channels.filter((c) => statewide || c.slot == null || c.slot < 200)
     .sort((a, b) => (a.slot ?? 1e6) - (b.slot ?? 1e6) || a.sort - b.sort);
   $("#ch-table tbody").replaceChildren(...(list.length ? list.map((c) => h("tr", {},
@@ -3134,6 +3603,9 @@ function editChannel(c) {
   for (const k of ["in_plan", "scan", "watch", "rx_only", "wiresx"]) f[k].checked = !!c[k];
   $("#ch-cancel").hidden = false; f.scrollIntoView({ behavior: "smooth" });
 }
+// the common set, said plainly before it's added
+const CH_STANDARD = "Add the common channels? GMRS/FRS 1-22, the GMRS repeater pairs, NOAA weather 1-7 (listen only), and the 2 m "
+  + "and 70 cm calling frequencies. Ones you already have are skipped; nothing is changed or removed."
 $("#ch-cancel").addEventListener("click", () => { editingCh = null; $("#ch-form").reset(); $("#ch-cancel").hidden = true; });
 $("#ch-form").addEventListener("submit", (e) => {
   e.preventDefault();
@@ -3145,8 +3617,8 @@ $("#ch-form").addEventListener("submit", (e) => {
   });
 });
 $("#ch-statewide").addEventListener("change", () => renderChannels());
-$("#ch-standard").addEventListener("click", () => guarded(async () => {
-  const r = await api("POST", "channels/standard"); toast(`Added ${r.added} channel(s)`); loadRadio();
+$("#ch-standard").addEventListener("click", () => confirm(CH_STANDARD) && guarded(async () => {
+  const r = await api("POST", "channels/standard"); toast(r.added ? `Added ${r.added} channel(s)` : "You already have all of them"); loadRadio();
 }));
 $("#ch-import").addEventListener("click", () => {
   const file = $("#ch-import-file").files[0];
@@ -3447,11 +3919,12 @@ function medPersonCard(p) {
       h("button", { class: "link", onclick: () => confirm(`Remove ${m.name}?`) && guarded(async () => { await api("DELETE", `meds/${m.id}`); loadMedical(); }) }, "Remove"))
       : null));
   const editing = editingMed && editingMed.person_id === p.id ? editingMed : null;
-  return h("div", { class: "card" },
-    h("div", { class: "row" }, h("h2", {}, p.name, p.remote ? h("span", { class: "tag" }, "lives elsewhere") : null)),
+  return h("div", { class: "card med-person" },
+    h("div", { class: "row" }, h("h2", {}, p.name, p.remote ? h("span", { class: "tag" }, "lives elsewhere") : null,
+      !meds.length && !p.medications ? h("span", { class: "tag" }, "no medicines") : null)),
     facts.length ? h("dl", { class: "med-facts" }, ...facts.flatMap(([k, v]) => [h("dt", {}, k), h("dd", {}, v)])) : null,
-    meds.length ? meds : h("p", { class: "muted" }, p.medications ? `Listed on the Family tab: ${p.medications}. Add them here to track supply.` : "No medicines."),
-    p.can_edit ? h("details", { open: editing ? true : null }, h("summary", { class: "link" }, editing ? `Edit ${editing.name}` : "Add a medicine"), medForm(p, editing)) : null);
+    meds.length ? meds : p.medications ? h("p", { class: "muted" }, `Listed on the Family tab: ${p.medications}. Add them here to track supply.`) : null,
+    p.can_edit ? h("details", { class: "add-form", open: editing ? true : null }, h("summary", {}, editing ? `Edit ${editing.name}` : "Add a medicine"), medForm(p, editing)) : null);
 }
 function medForm(p, m) {
   m = m || {};
@@ -3772,11 +4245,15 @@ async function loadMesh() {
     : h("p", { class: "muted" }, "Not set up yet. An admin connects a MeshCore radio below."));
   const admin = isAdmin();
   $("#mesh-admin").hidden = !admin;
+  $("#mesh-setup-card").hidden = !admin;
   if (!admin) return;
   MESH_ADMIN = r;
   const f = $("#mesh-form");
   if (!f.contains(document.activeElement)) {
     f.enabled.checked = !!s.enabled; f.connect.value = s.connect || ""; f.brief_at.value = s.brief_at || "";
+    f.brief_user.replaceChildren(h("option", { value: "0" }, "The household brief"),
+      ...(r.brief_people || []).map((u) => h("option", { value: String(u.id) }, u.username + "'s brief")));
+    f.brief_user.value = String(s.brief_user || 0);
     $("#mesh-channels").replaceChildren(...chans.map(meshChannelRow));
     const offNow = new Set(r.bot_off || []);
     $("#mesh-bot-cmds").replaceChildren(...MESH_CMDS.filter((c) => c[3]).map(([label, , , key]) =>
@@ -3826,13 +4303,19 @@ function renderMeshNodes(list) {
         await api("POST", "mesh/nodes/" + n.public_key, { person_uid: n.person_uid, label: e.target.value }); toast("Saved"); }) }),
       h("button", { type: "button", class: "link danger", onclick: () => confirm(`Forget ${n.name || "this node"}? If the radio hears it again it comes back, without an owner.`) &&
         guarded(async () => { await api("DELETE", "mesh/nodes/" + n.public_key); loadMesh(); }) }, "Forget")));
-  const people = list.filter((n) => n.person_uid || n.node_type === 1 || n.node_type === 0);
-  const infra = list.filter((n) => !people.includes(n));
-  box.replaceChildren(list.length ? [
-    h("ul", { class: "plain mesh-node-list" }, ...people.map(row)),
-    infra.length ? h("details", {}, h("summary", {}, `Repeaters, room servers and sensors (${infra.length})`),
-      h("ul", { class: "plain mesh-node-list" }, ...infra.map(row))) : null]
-    : h("p", { class: "muted" }, "None yet. Nodes show up here as the radio hears their adverts."));
+  const mine = list.filter((n) => n.person_uid);
+  const others = list.filter((n) => !n.person_uid);
+  const heard = h("ul", { class: "plain mesh-node-list" }, ...others.map(row));
+  const search = h("input", { type: "search", placeholder: "Find by name or key", "aria-label": "Find a node", oninput: (e) => {
+    const q = e.target.value.trim().toLowerCase();
+    [...heard.children].forEach((li, i) => { const n = others[i]; li.hidden = !!q && !`${n.name} ${n.public_key} ${n.label || ""}`.toLowerCase().includes(q); });
+  } });
+  box.replaceChildren(
+    mine.length ? h("ul", { class: "plain mesh-node-list" }, ...mine.map(row))
+      : h("p", { class: "muted" }, "No family nodes linked yet. A family member's node usually links itself the first time they check in on a family channel."),
+    others.length ? h("details", { class: "mesh-heard" }, h("summary", {}, `Heard nearby (${others.length})`),
+      h("p", { class: "muted" }, "Everyone else's radios, repeaters and room servers this radio has heard. You only need these if a family member's new radio hasn't linked itself: find it and pick whose it is."),
+      search, heard) : null);
 }
 $("#mesh-node-form").addEventListener("submit", (e) => {
   e.preventDefault();
@@ -3883,7 +4366,7 @@ $("#mesh-form").addEventListener("submit", (e) => {
   });
   guarded(async () => {
     const bot_off = $$("#mesh-bot-cmds [name=bot_cmd]").filter((i) => !i.checked).map((i) => i.value);
-    await api("POST", "mesh", { enabled: f.enabled.checked, connect: f.connect.value, channels, bot_off, brief_at: f.brief_at.value });
+    await api("POST", "mesh", { enabled: f.enabled.checked, connect: f.connect.value, channels, bot_off, brief_at: f.brief_at.value, brief_user: Number(f.brief_user.value) });
     toast("Saved. The radio reconnects in a few seconds."); document.activeElement?.blur(); setTimeout(loadMesh, 4000); loadMesh();
   });
 });
@@ -3916,9 +4399,11 @@ function renderContacts() {
 function editContact(c) {
   editingContact = c.id;
   const f = $("#contact-form");
-  for (const k of ["name", "relation", "phone", "email", "notes"]) f[k].value = c[k];
+  for (const k of ["name", "relation", "phone", "email", "notes"]) f[k].value = c[k] || "";
   f.out_of_area.checked = !!c.out_of_area;
   $("#contact-cancel").hidden = false;
+  f.scrollIntoView({ behavior: "smooth", block: "center" });   // opens the folded "Add a contact" form
+  f.name.focus({ preventScroll: true });
 }
 $("#contact-cancel").addEventListener("click", () => { editingContact = null; $("#contact-form").reset(); $("#contact-cancel").hidden = true; });
 $("#contact-form").addEventListener("submit", (e) => {
@@ -4017,11 +4502,66 @@ guarded(async () => {
   await refresh();
   let tab = "home";
   try { tab = localStorage.getItem("bunkr-tab") || tab; } catch {}
-  if (location.hash.length > 1 && $(`#tabs [data-tab="${location.hash.slice(1)}"]`)) tab = location.hash.slice(1);
+  const link = location.hash;  // read before showTab rewrites the address
+  if (link.length > 1 && $(`#tabs [data-tab="${link.slice(1)}"]`)) tab = link.slice(1);
   if (!$(`#tabs [data-tab="${tab}"]`) || $(`#tabs [data-tab="${tab}"]`).hidden) tab = "home";
   showTab(tab);
+  if (link.length > 1) openLink(link);
   if (isAdmin()) pollJob();
 });
 
 // a shortened paragraph in the brief opens in full when tapped
 document.addEventListener("click", (e) => { const p = e.target.closest(".story .agree"); if (p) p.classList.toggle("full"); });
+
+async function loadNewsSources() {
+  const r = await api("GET", "news/sources").catch(() => null);
+  $("#news-sources-card").hidden = !r || !isAdmin();
+  if (!r) return;
+  $("#news-sources").replaceChildren(...sourceGroups(r.sources, { checked: (o) => o.fetched, note: (o) => o.health }));
+  const sick = r.sources.filter((o) => o.health);
+  if (sick.length) $("#news-sources").prepend(h("p", { class: "warn" },
+    `${sick.length} feed${sick.length === 1 ? "" : "s"} may have stopped: ` + sick.map((o) => `${o.name} (${o.health})`).join(", ") + "."));
+}
+$("#news-sources-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const off = $$("#news-sources input[name=outlet]").filter((x) => !x.checked).map((x) => x.value);
+  guarded(async () => { await api("POST", "news/sources", { off }); toast(off.length ? `${off.length} outlet${off.length === 1 ? "" : "s"} off for everyone` : "Every outlet on"); });
+});
+// explanatory paragraphs on cards fold behind an ⓘ; any long ones left over show two lines until tapped
+foldHelp();
+clampHelp();
+markAddFolds();
+// a scenario supply's long list of what we have: two lines until tapped
+document.addEventListener("click", (e) => { const w = e.target.closest(".supply .where"); if (w) w.classList.toggle("full"); });
+
+// Setup screens are long lists of settings: each card folds to its title (folded until opened; this phone remembers).
+const FOLD_TABS = ["household", "downloads", "radios", "sites", "nodes"];
+function foldCards() {
+  let saved = {};
+  try { saved = JSON.parse(localStorage.getItem("bunkr-folds") || "{}"); } catch {}
+  const cards = [...FOLD_TABS.flatMap((tab) => $$(`#tab-${tab} > .card`).map((c) => [tab, c])),
+    ...$$("main .card.fold-me").map((c) => [(c.closest(".tab") || {}).id || "", c])];
+  for (const [tab, card] of cards) {
+    {
+      const h2 = card.querySelector("h2");
+      if (!h2 || card.classList.contains("foldable")) continue;
+      const head = [...card.children].find((c) => c === h2 || c.contains(h2));
+      if (!head) continue;
+      const key = tab + ":" + (card.id || h2.textContent.trim());
+      head.classList.add("fold-head");
+      card.classList.add("foldable");
+      card.classList.toggle("folded", saved[key] !== "open");
+      h2.setAttribute("role", "button"); h2.tabIndex = 0;
+      h2.setAttribute("aria-expanded", String(!card.classList.contains("folded")));
+      const flip = () => {
+        const open = card.classList.toggle("folded") === false;
+        h2.setAttribute("aria-expanded", String(open));
+        saved[key] = open ? "open" : "shut";
+        try { localStorage.setItem("bunkr-folds", JSON.stringify(saved)); } catch {}
+      };
+      h2.addEventListener("click", flip);
+      h2.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); flip(); } });
+    }
+  }
+}
+foldCards();

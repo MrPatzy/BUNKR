@@ -40,7 +40,7 @@ from . import checkins, meshbot, meshcore
 
 import collections
 
-DEFAULTS = {"enabled": False, "connect": "", "channels": [], "bot_off": [], "brief_at": ""}
+DEFAULTS = {"enabled": False, "connect": "", "channels": [], "bot_off": [], "brief_at": "", "brief_user": 0}
 ALERT_LEVELS = {"all": "Alerts, flights and early news", "flash": "Only flash alerts", "off": "No alerts"}
 ALERTS_PER_HOUR = 6
 QUIET = ("22:00", "06:30")
@@ -93,6 +93,7 @@ def settings(store):
     out["channels"] = [_channel(c) for c in out["channels"] if isinstance(c, dict)]
     out["bot_off"] = [c for c in out["bot_off"] if c in meshbot.SWITCHABLE] if isinstance(out["bot_off"], list) else []
     out["brief_at"] = out["brief_at"] if isinstance(out["brief_at"], str) and re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", out["brief_at"]) else ""
+    out["brief_user"] = out["brief_user"] if isinstance(out["brief_user"], int) and not isinstance(out["brief_user"], bool) and out["brief_user"] > 0 else 0
     return out
 
 
@@ -176,6 +177,14 @@ def save_settings(store, data):
         if t and not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", t):
             raise ValueError("the daily mesh brief time is like 07:00 (or empty for none)")
         s["brief_at"] = t
+    if "brief_user" in data:  # 0 or empty: the household brief; otherwise one person's
+        try:
+            who = int(data["brief_user"] or 0)
+        except (TypeError, ValueError):
+            raise ValueError("pick a person from the list, or the household brief")
+        if who and not store._rows("SELECT 1 FROM users WHERE id=?", (who,)):
+            raise ValueError("that person has no login")
+        s["brief_user"] = max(0, who)
     if "channels" in data:
         rows = data["channels"]
         if not isinstance(rows, list) or len(rows) > MAX_CHANNELS:
@@ -681,6 +690,6 @@ def view(store, link, admin=True):
         return {"channels": [{k: c[k] for k in ("name", "link", "kind", "bot")} for c in chans], "bot_off": s["bot_off"],
                 "status": {"state": (dict(link.status) if link else {}).get("state", "off")}, "words": {k: v[:4] for k, v in WORDS.items()}}
     return {"settings": {k: v for k, v in s.items() if k != "channels"}, "channels": chans, "kinds": KINDS, "bot_levels": BOT_LEVELS,
-            "alert_levels": ALERT_LEVELS, "switchable": meshbot.SWITCHABLE, "bot_off": s["bot_off"],
+            "alert_levels": ALERT_LEVELS, "brief_people": store._rows("SELECT id, username FROM users ORDER BY username"), "switchable": meshbot.SWITCHABLE, "bot_off": s["bot_off"],
             "defaults": CHANNEL, "status": dict(link.status) if link else {"state": "off"}, "nodes": nodes(store),
             "log": recent(store), "words": {k: v[:4] for k, v in WORDS.items()}}

@@ -15,7 +15,7 @@ import html
 import io
 from datetime import datetime
 
-KINDS = {"handheld": "Handheld", "mobile": "Mobile", "hf": "HF transceiver"}
+KINDS = {"handheld": "Handheld", "mobile": "Mobile", "base": "Base station", "hf": "HF transceiver"}
 SERVICES = {"ham": "Amateur (ham)", "gmrs": "GMRS", "frs": "FRS", "noaa": "NOAA weather (receive only)",
             "other": "Other"}
 

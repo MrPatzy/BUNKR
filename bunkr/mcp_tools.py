@@ -383,7 +383,7 @@ def make_tools(srv):
         return msg
 
     def morning_brief(a, user):
-        rec = brief.latest(store, a.get("day"))
+        rec = brief.personalise(store, brief.latest(store, a.get("day")), user.get("id"))
         if not rec:
             return "No brief yet. It's made each morning."
         O = rec.get("outlets") or {}

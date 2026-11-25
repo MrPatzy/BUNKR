@@ -239,8 +239,10 @@ def _plan(store, event, data, at=None, inbox=False):
                 msg = {"tier": "priority", "urgency": "normal"}
             if msg:
                 where = (f"at {data['site']}" if data.get("km") == 0 else f"{data['km']} km from {data['site']}") if data.get("site") and data.get("km") is not None else data.get("where_text", "")
-                msg.update(title=data["title"], body=where or (data.get("summary") or "")[:140], tag="sit-" + data["uid"],
-                           url="/#situation")
+                summary = " ".join((data.get("summary") or "").split())
+                summary = summary if len(summary) <= 200 else summary[:199].rsplit(" ", 1)[0] + "…"
+                msg.update(title=data["title"], body=" · ".join(x for x in (where, summary) if x), tag="sit-" + data["uid"],
+                           url="/#sit-" + urllib.parse.quote(data["uid"], safe=""))
         elif event == "checkin":
             if person_user.get(data.get("person_uid")) == u["id"]:
                 continue  # your own check-in
@@ -275,7 +277,7 @@ def _plan(store, event, data, at=None, inbox=False):
         elif event == "brief":
             if p.get("brief") and not quiet:
                 msg = {"tier": "brief", "urgency": "low", "title": data.get("title") or "Morning brief", "body": data.get("body") or "",
-                       "tag": "brief", "url": "/#brief"}
+                       "tag": "brief", "url": "/#news-brief"}
         elif event == "news":
             # raised early (a hack, an outage, a danger in the US or Colorado) or a word this person watches for:
             # "Soon / near you" rules, so it respects quiet hours and the daily cap
@@ -316,7 +318,7 @@ def record(store, user_id, msg, at=None):
 
 
 def notices(store, user_id, limit=50):
-    rows = store._rows("SELECT id, at, tier, title, body, url, read_at FROM notices WHERE user_id=? ORDER BY id DESC LIMIT ?",
+    rows = store._rows("SELECT id, at, tier, title, body, url, tag, read_at FROM notices WHERE user_id=? ORDER BY id DESC LIMIT ?",
                        (user_id, limit))
     return {"items": rows, "unread": unread(store, user_id)}
 
@@ -371,9 +373,10 @@ def deliver(store, key, sub, msg, opener=None, ttl=None):
     return status
 
 
-def send(store, key, event, data, opener=None, at=None, push=True, mail=None):
+def send(store, key, event, data, opener=None, at=None, push=True, mail=None, phone=False):
     """Plan and deliver one event: into each person's inbox, by email for reminders when they chose it (mail(to, msg)),
-    and as pushes (push=False or no key: none). Returns [(user_id, status)] for the pushes."""
+    as pushes (push=False or no key: none) and, with phone=True, to the paired BUNKR phone apps' notification stream
+    (bunkr/phone.py: same people, same rules, no internet needed). Returns [(user_id, status)] for the pushes."""
     if event != "test":
         for user_id, msg in _plan(store, event, data, at, inbox=True):
             record(store, user_id, msg)
@@ -382,10 +385,16 @@ def send(store, key, event, data, opener=None, at=None, push=True, mail=None):
                 if wants(store, user_id, "email", p):
                     mail(p["email"], msg)
     results = []
-    if not push or key is None:
+    pushing = push and key is not None
+    if not pushing and not phone:
         return results
     for user_id, msg in plan(store, event, data, at):
         if msg["tier"] == "reminder" and not wants(store, user_id, "push"):
+            continue
+        if phone:
+            from . import phone as phone_app
+            phone_app.publish(store, user_id, event, msg)
+        if not pushing:
             continue
         subs = subscriptions(store, {user_id})
         ok = 0
@@ -420,6 +429,6 @@ class Notifier:
         try:
             on = self.enabled()  # a node that has reached the hub lately leaves pushes and email to the hub
             push = on and bool(self.store._rows("SELECT 1 FROM push_subs LIMIT 1"))
-            send(self.store, self.key if push else None, event, data, push=push, mail=self.mail if on else None)
+            send(self.store, self.key if push else None, event, data, push=push, mail=self.mail if on else None, phone=on)
         except Exception:
             pass  # never let a notification problem reach a request

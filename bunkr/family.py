@@ -144,7 +144,7 @@ def plan_html(people, contacts, sites, channels, info, household_name="Our famil
                     for p in people if p["call_sign"] or p["gmrs_call"])
     chan_rows = "".join(
         f"<tr><td>{e(c['name'])}</td><td>{c['rx_mhz']:.4f}</td><td>{e(c['notes'])}</td></tr>" for c in channels if c["in_plan"]) \
-        or "<tr><td colspan=3>Tick \"In family plan\" on the channels everyone should know (Comms tab).</td></tr>"
+        or "<tr><td colspan=3>Tick \"In family plan\" on the channels everyone should know (Mesh &amp; radios).</td></tr>"
     out_area = next((c for c in contacts if c["out_of_area"]), None)
     near = next((s for s in meet if s["kind"] == "meet_near"), None)
     far = next((s for s in meet if s["kind"] == "meet_far"), None)

@@ -289,6 +289,7 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(self.req("GET", "/api/state", user="kid")[1]["unread"], 2)
         code, r = self.req("GET", "/api/notices", user="kid")
         self.assertEqual((code, r["unread"], [i["title"] for i in r["items"]]), (200, 2, ["Morning brief", "Jordan: I'm safe"]))
+        self.assertEqual(r["items"][0]["tag"], "brief")           # the app opens what a notification is about from its tag
         self.assertEqual(self.req("GET", "/api/notices")[1]["items"], [])                    # each person's own
         self.assertEqual(self.req("POST", "/api/notices/read", {"ids": [r["items"][0]["id"]]}, user="kid")[1]["unread"], 2 - 1)
         self.assertEqual(self.req("POST", "/api/notices/read", {"ids": "all"}, user="kid")[0], 400)

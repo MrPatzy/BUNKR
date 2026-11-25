@@ -73,8 +73,17 @@ def battery(level, low=False):
     return level, 1 if low or (level is not None and level <= LOW_BATTERY) else 0
 
 
+def _accuracy(v):
+    """How exact a phone's location was, in metres (a positive number), or None."""
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return None
+    return round(v, 1) if 0 <= v < 1e7 else None
+
+
 def add_checkin(store, person_uid, status, note="", place="", lat=None, lon=None, via="app", by_name="", at=None,
-                battery_level=None, battery_low=False):
+                battery_level=None, battery_low=False, accuracy=None):
     if status not in STATUSES:
         raise ValueError("status must be one of: " + ", ".join(STATUSES))
     if via not in VIA:
@@ -88,6 +97,7 @@ def add_checkin(store, person_uid, status, note="", place="", lat=None, lon=None
            "note": (note or "").strip()[:300], "place": (place or "").strip()[:200],
            "lat": _coord(lat, 90), "lon": _coord(lon, 180), "call_uid": call["uid"] if call else "",
            "via": via, "by_name": (by_name or "").strip()[:80], "at": at or now(), "battery": level, "battery_low": low}
+    rec["accuracy"] = _accuracy(accuracy) if rec["lat"] is not None and rec["lon"] is not None else None
     cols = list(rec)
     store._exec(f"INSERT INTO checkins({', '.join(cols)}) VALUES({', '.join('?' for _ in cols)})", tuple(rec.values()))
     _emit("checkin", rec | {"status_label": STATUSES[status]})
@@ -194,7 +204,7 @@ def recent(store, limit=30):
 
 # ---------- sync ----------
 CHECKIN_FIELDS = ("uid", "person_uid", "person_name", "status", "note", "place", "lat", "lon", "call_uid", "via", "by_name", "at",
-                  "battery", "battery_low")
+                  "battery", "battery_low", "accuracy")
 CALL_FIELDS = ("uid", "kind", "site_uid", "place", "address", "lat", "lon", "message", "created_by", "created_at",
                "ended_at", "ended_by", "updated_at", "drill")
 PEOPLE_SYNC_FIELDS = ("uid", "name", "role", "remote", "phone", "mesh_name", "updated_at")
@@ -240,6 +250,7 @@ def apply(store, incoming, from_hub=False):
             vals = {f: c.get(f) for f in CHECKIN_FIELDS}
             vals["via"] = vals["via"] if vals["via"] in VIA else "other"
             vals["battery"], vals["battery_low"] = battery(c.get("battery"), c.get("battery_low"))  # older nodes don't send it
+            vals["accuracy"] = _accuracy(c.get("accuracy"))
             for f in ("note", "place", "person_name", "by_name", "call_uid"):
                 vals[f] = str(vals.get(f) or "")[:300]
             cols = [*vals, "received_at"]

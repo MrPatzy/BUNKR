@@ -34,16 +34,15 @@
 </section>
 <div class="shell">
 <nav id="tabs" class="drawer" aria-label="Screens">
+  <div class="drawer-me"><button type="button" data-tab="account" id="menu-account">My account</button></div>
   <details open data-group="today"><summary>Today</summary>
     <button data-tab="home" class="active">Home</button>
     <button data-tab="brief">News</button>
     <button data-tab="situation">Situation</button>
   </details>
-  <details open data-group="family"><summary>Family</summary>
+  <details open data-group="people"><summary>People</summary>
     <button data-tab="family">Family</button>
     <button data-tab="medical">Medical</button>
-    <button data-tab="comms">Comms</button>
-    <button data-tab="scenarios">Scenarios</button>
     <button data-tab="recovery">Recovery</button>
   </details>
   <details open data-group="supplies"><summary>Supplies</summary>
@@ -52,123 +51,66 @@
     <button data-tab="locations">Locations &amp; kits</button>
     <button data-tab="shopping">Shopping</button>
   </details>
-  <details open data-group="places"><summary>Places &amp; power</summary>
-    <button data-tab="sites">Sites &amp; alerts</button>
+  <details open data-group="plans"><summary>Plans</summary>
+    <button data-tab="scenarios">Scenarios</button>
+    <button data-tab="comms">Comms</button>
     <button data-tab="power">Power</button>
   </details>
-  <details data-group="admin"><summary>Admin</summary>
+  <details data-group="setup"><summary>Setup</summary>
+    <button data-tab="household">Household</button>
+    <button data-tab="sites">Sites &amp; maps</button>
+    <button data-tab="radios">Mesh &amp; radios</button>
     <button data-tab="documents" data-admin>Documents</button>
     <button data-tab="kit" data-admin>USB kit</button>
     <button data-tab="backups" data-admin>Backups</button>
     <button data-tab="nodes" data-admin>Nodes</button>
     <button data-tab="downloads" data-admin>Downloads</button>
   </details>
-  <details open data-group="settings"><summary>Settings</summary>
-    <button data-tab="household">Household &amp; account</button>
-  </details>
+  <div class="drawer-account" id="drawer-account" hidden>
+    <span class="muted" id="drawer-who"></span>
+    <button type="button" class="link" id="drawer-view"></button>
+    <button type="button" class="link" id="drawer-logout">Log out</button>
+  </div>
 </nav>
 
 <main>
   <div id="offline-bar" class="offline-bar" role="status" hidden></div>
+  <div id="demo-bar" class="demo-bar" hidden>Demo: the Rivera family is made up. Nothing here is real, and nothing is fetched or sent.</div>
   <div id="toast" class="toast" hidden></div>
 
   <section id="tab-home" class="tab">
     <div id="call-card" class="card call-card" hidden></div>
+    <div class="chip-strip" id="home-chips" role="list" aria-label="At a glance" hidden></div>
     <div class="card checkin-card" id="checkin-card">
-      <div class="checkin-btns" id="checkin-btns"></div>
-      <p class="muted" id="checkin-help">Let the family know how you are. It shows on everyone's Home screen.</p>
-      <details class="checkin-extra" id="checkin-extra"><summary>Add a note, my location or a flight</summary>
+      <p class="warn" id="checkin-help" hidden></p>
+      <details class="checkin-extra" id="checkin-extra"><summary>+ note, location or flight</summary>
         <input id="checkin-note" maxlength="300" placeholder="Where you are, what you need">
-        <input id="checkin-flight" maxlength="12" placeholder="Flying? Flight number, e.g. UA 1234" aria-label="Flight number" autocapitalize="characters">
+        <input id="checkin-flight" maxlength="40" list="airline-list" placeholder="Flying? Airline and number, e.g. United 1234" aria-label="Flight number" autocapitalize="words">
+        <datalist id="airline-list"></datalist>
         <label class="check"><input type="checkbox" id="checkin-loc"> Share my location</label>
         <label class="check" id="checkin-lowbat-box"><input type="checkbox" id="checkin-lowbat"> My battery is low</label>
         <p class="muted" id="checkin-batt" hidden></p>
       </details>
+      <div class="checkin-btns" id="checkin-btns"></div>
       <div class="flight-prompt" id="flight-prompt" hidden></div>
-      <span class="muted me-name" id="me-name"></span>
     </div>
     <div class="home-tiles" id="home-tiles">
     <div class="card tile-card" data-tile="board">
       <h2 class="tile-head"><button type="button" class="tile-toggle" aria-expanded="true">Family</button></h2>
-      <div class="tile-body"><ul class="board" id="board"></ul></div>
+      <div class="tile-body"><ul class="board" id="board"></ul>
+        <p class="board-actions"><button type="button" id="call-open" hidden>Send a family call</button></p></div>
     </div>
     <div class="card tile-card" data-tile="alerts">
       <h2 class="tile-head"><button type="button" class="tile-toggle" aria-expanded="true">Alerts near us</button></h2>
       <div class="tile-body"><div id="home-alerts"></div></div>
     </div>
-    <div class="card tile-card" data-tile="news">
-      <h2 class="tile-head"><button type="button" class="tile-toggle" aria-expanded="true">Today's news</button></h2>
-      <div class="tile-body"><div id="home-news"></div></div>
-    </div>
     <div class="card tile-card" data-tile="med">
       <h2 class="tile-head"><button type="button" class="tile-toggle" aria-expanded="true">Medicines</button></h2>
       <div class="tile-body"><div id="home-med"></div></div>
     </div>
-    <div class="card tile-card" data-tile="lookup">
-      <h2 class="tile-head"><button type="button" class="tile-toggle" aria-expanded="true">Look it up</button></h2>
-      <div class="tile-body">
-      <form id="lookup-form" class="row gap"><input id="lookup-q" type="search" maxlength="200" placeholder="Search the offline library: burns, boil water, generator" aria-label="Search the offline library">
-        <button type="submit" class="primary">Search</button> <a class="btn" id="lookup-all" target="_blank" rel="noopener">All books</a></form>
-      <p class="muted" id="lookup-home" hidden>Books open on the home Wi-Fi.</p>
-      <ul class="plain lookup" id="lookup-out"></ul>
-    </div>
-    </div>
-    <div class="card tile-card" data-tile="places">
-      <h2 class="tile-head"><button type="button" class="tile-toggle" aria-expanded="true">Where we meet</button></h2>
-      <div class="tile-body"><ul id="home-places" class="plain"></ul></div>
-    </div>
-    <div class="card tile-card" data-tile="contacts">
-      <h2 class="tile-head"><button type="button" class="tile-toggle" aria-expanded="true">Who to call</button></h2>
-      <div class="tile-body"><ul id="home-contacts" class="plain"></ul></div>
-    </div>
-    <div class="card tile-card" data-tile="ready">
-      <h2 class="tile-head"><button type="button" class="tile-toggle" aria-expanded="true">Are we ready?</button></h2>
-      <div class="tile-body"><p id="home-ready"></p>
-        <div class="quick-add"><button type="button" class="small" data-quick="scan">Scan a barcode</button>
-          <button type="button" class="small" data-quick="paste">Paste a list</button>
-          <button type="button" class="small" data-quick="one">Add one item</button></div></div>
-    </div>
     <div class="card tile-card" data-tile="lastcall">
       <h2 class="tile-head"><button type="button" class="tile-toggle" aria-expanded="true">Last family call</button></h2>
       <div class="tile-body"><div id="lastcall-card"></div></div>
-    </div>
-    <div class="card tile-card" data-tile="sendcall">
-      <h2 class="tile-head"><button type="button" class="tile-toggle" aria-expanded="true">Send a family call</button></h2>
-      <div class="tile-body">
-      <p class="muted">Everyone sees it at the top of their Home screen, and on the Pi, until you send "All clear".</p>
-      <form id="call-form" class="form-grid">
-        <label>What<select name="kind" id="call-kind"></select></label>
-        <label id="call-site-label">Where<select name="site_id" id="call-site"></select></label>
-        <label class="span2">Message<input name="message" maxlength="500" placeholder="Optional: route, what to bring, when"></label>
-        <label class="check span-all"><input type="checkbox" name="drill"> This is a drill: marked DRILL everywhere, never notifies during
-          quiet hours, and you get a report of who checked in and how fast.</label>
-        <div class="actions span-all"><button type="submit" class="primary">Send to everyone</button></div>
-      </form>
-    </div>
-    </div>
-    <div class="card tile-card" data-tile="push">
-      <h2 class="tile-head"><button type="button" class="tile-toggle" aria-expanded="true">Notifications on this phone</button></h2>
-      <div class="tile-body">
-      <div class="row-right"><button id="push-toggle" class="primary"></button> <button id="push-test" hidden>Send a test</button></div>
-      <p class="muted" id="push-status"></p>
-      <p class="muted" id="push-ios" hidden>On iPhone: tap Share, then <strong>Add to Home Screen</strong>. Open BUNKR from the
-        Home Screen and turn notifications on there (iOS 16.4 or later).</p>
-      <form id="push-prefs" class="form-grid">
-        <p class="muted span-all">Always on: "Act now" alerts at your places, family calls, and anyone who needs help. They come
-          through quiet hours too.</p>
-        <label class="check"><input type="checkbox" name="priority"> "Soon / near you" alerts</label>
-        <label>Up to this many a day<input type="number" name="priority_cap" min="0" max="20"></label>
-        <label>Family check-ins<select name="checkins" id="push-checkins"></select></label>
-        <label class="check"><input type="checkbox" name="brief"> Morning brief</label>
-        <label>Quiet from<input type="time" name="quiet_start"></label>
-        <label>Quiet until<input type="time" name="quiet_end"></label>
-        <label>Reminders (documents, medicine)<select name="reminders_by" id="push-reminders"></select></label>
-        <label>My email<input type="email" name="email" autocomplete="email" placeholder="for reminders by email"></label>
-        <p class="muted span-all" id="push-email-note" hidden></p>
-        <p class="muted span-all">Everything also shows under the bell at the top, even during quiet hours.</p>
-        <div class="actions span-all"><button type="submit">Save</button></div>
-      </form>
-    </div>
     </div>
     <div class="card tile-card" data-tile="backup">
       <h2 class="tile-head"><button type="button" class="tile-toggle" aria-expanded="true">Backups</button></h2>
@@ -180,6 +122,18 @@
     </div>
     </div>
     <p class="home-foot"><button type="button" id="home-arrange">Arrange Home</button></p>
+    <dialog id="call-dialog">
+      <div class="row"><h2>Send a family call</h2><button type="button" class="link" id="call-close">Close</button></div>
+      <form id="call-form" class="form-grid">
+        <p class="muted span-all">Everyone sees it at the top of their Home screen, and on the Pi, until you send "All clear".</p>
+        <label>What<select name="kind" id="call-kind"></select></label>
+        <label id="call-site-label">Where<select name="site_id" id="call-site"></select></label>
+        <label class="span2">Message<input name="message" maxlength="500" placeholder="Optional: route, what to bring, when"></label>
+        <label class="check span-all"><input type="checkbox" name="drill"> This is a drill: marked DRILL everywhere, never notifies during
+          quiet hours, and you get a report of who checked in and how fast.</label>
+        <div class="actions span-all"><button type="submit" class="primary">Send to everyone</button></div>
+      </form>
+    </dialog>
     <dialog id="arrange-dialog">
       <div class="row"><h2>Arrange Home</h2><button type="button" class="link" id="arrange-close">Done</button></div>
       <p class="muted">Drag <span aria-hidden="true">&#8942;&#8942;</span> or use the arrows to move a tile; untick to hide it. The family call and check-in
@@ -194,7 +148,6 @@
       <button type="button" data-nv="feed" class="on" aria-pressed="true">For you</button>
       <button type="button" data-nv="map" aria-pressed="false">Map</button>
       <button type="button" data-nv="brief" aria-pressed="false">Morning brief</button>
-      <button type="button" data-nv="chatter" aria-pressed="false">Unconfirmed</button>
     </div>
     <div id="news-feed-view">
       <div class="chip-row" id="news-areas" role="group" aria-label="Where"></div>
@@ -222,16 +175,6 @@
       </div>
       <div id="map-list"></div>
     </div>
-    <div id="news-chatter-view" hidden>
-      <div class="card chatter-about">
-        <h2>Unconfirmed: what people are posting</h2>
-        <p class="muted">Public posts on Bluesky and Reddit that name a family town and mention trouble (water, power, fire, a hack...).
-          Nobody has checked these: treat them as a heads-up, not a fact. When a news outlet reports it, the post says so.
-          Two different people posting the same thing goes to everyone's bell.</p>
-        <p class="muted" id="chatter-places"></p>
-      </div>
-      <div id="chatter-list"></div>
-    </div>
     <div id="news-brief-view" hidden>
       <div class="card">
         <div class="row"><h2 id="brief-title">Morning brief</h2>
@@ -254,6 +197,10 @@
         <div class="check-grid" id="news-prefs-areas"></div>
         <h3>Topics</h3>
         <div class="check-grid" id="news-prefs-topics"></div>
+        <h3>Sources</h3>
+        <p class="muted">Untick a region, or open it and untick single outlets, to keep them out of your feed. A story others
+          reported stays, without that outlet.</p>
+        <div id="news-prefs-sources" class="src-groups"></div>
         <h3>Watch for</h3>
         <label>Words or names to tell me about as soon as any outlet has them, one per line (your bank, your town, "USDA")
           <textarea name="watch" rows="3" maxlength="900" placeholder="Your power company&#10;Your bank&#10;Your town"></textarea></label>
@@ -294,7 +241,7 @@
         </form>
       </div>
       <div class="card">
-        <h2>Add a device</h2>
+        <details class="add-form"><summary>Add a device</summary>
         <p><label>A common one<select id="pw-preset"></select></label></p>
         <form id="pw-dev-form" class="form-grid">
           <label class="span2">Device<input name="name" required></label>
@@ -307,12 +254,16 @@
           <label class="span2">Notes<input name="notes"></label>
           <div class="actions span-all"><button type="submit" class="primary" id="pw-dev-save">Add</button>
             <button type="button" id="pw-dev-cancel" hidden>Cancel edit</button></div>
-        </form>
+        </form></details>
       </div>
     </div>
     <div class="card"><p class="muted" id="pw-assume"></p></div>
   </section>
   <section id="tab-situation" class="tab" hidden>
+    <div class="card" id="weather-card">
+      <h2>Weather at home</h2>
+      <div id="home-weather"></div>
+    </div>
     <div class="card">
       <div class="row"><h2>What's happening</h2>
         <div class="row-right"><span class="muted" id="sit-asof"></span>
@@ -336,8 +287,8 @@
     <div class="card"><h2>Good to know</h2><div id="sit-routine"></div></div>
     </div>
     <div class="grid2">
-      <div class="card"><h2>Sources</h2><ul class="plain" id="sit-sources"></ul></div>
-      <div class="card" id="sit-prefs-card" hidden>
+      <div class="card"><details class="sit-sources-box"><summary id="sit-sources-sum">Sources</summary><ul class="plain" id="sit-sources"></ul></details></div>
+      <div class="card fold-me" id="sit-prefs-card" hidden>
         <h2>What to watch</h2>
         <p class="muted">A cyber item becomes "near you" when it names something here. One per line.</p>
         <form id="sit-prefs" class="form-grid">
@@ -355,6 +306,13 @@
       <p class="muted" id="field-sync"></p>
       <div class="field-links" id="field-links"></div>
       <p class="muted" id="field-lock" hidden></p>
+    </div>
+    <div class="card" id="ready-card">
+      <h2>Are we ready?</h2>
+      <p id="home-ready"></p>
+      <div class="quick-add"><button type="button" class="small" data-quick="scan">Scan a barcode</button>
+        <button type="button" class="small" data-quick="paste">Paste a list</button>
+        <button type="button" class="small" data-quick="one">Add one item</button></div>
     </div>
     <div id="run-card" hidden></div>
     <div class="card alerts-card" id="alerts-card" hidden>
@@ -402,7 +360,7 @@
       <div class="row"><h2 id="item-form-title">Add item</h2>
         <div class="row-right quick-add"><button type="button" class="small" data-quick="scan">Scan a barcode</button>
           <button type="button" class="small" data-quick="paste">Paste a list</button>
-          <button type="button" class="small phone-only" id="add-open" aria-expanded="false">Add one item</button></div></div>
+          <button type="button" class="small" id="add-open" aria-expanded="false">Add one item</button></div></div>
       <form id="item-form" class="form-grid">
         <label>Name<input name="name" required placeholder="e.g. 5-gallon water jug"></label>
         <label>Category<select name="category" id="item-category"></select></label>
@@ -432,6 +390,7 @@
         <div class="actions span-all">
           <button type="submit" class="primary">Save item</button>
           <button type="button" id="item-cancel" hidden>Cancel edit</button>
+          <button type="button" id="item-delete" class="danger" hidden>Delete item</button>
         </div>
       </form>
     </div>
@@ -442,8 +401,15 @@
           <input id="inv-search" type="search" placeholder="Search">
           <select id="inv-filter"><option value="">All categories</option></select>
           <select id="inv-loc-filter"><option value="">All locations</option></select>
-          <a class="btn" href="/api/export.csv" download="inventory.csv">Export CSV</a>
-          <a class="btn" href="/api/report.html" target="_blank" rel="noopener">Printable report</a>
+          <span class="inv-files"><a class="btn small" href="/api/export.csv" download="inventory.csv">Export CSV</a>
+          <details class="menu" id="imp-menu"><summary class="btn small">Import</summary>
+            <div class="menu-list">
+              <label class="btn small" for="imp-file">Import a CSV file</label>
+              <a class="btn small" href="/api/inventory-template.csv" download="inventory-template.csv">Export template</a>
+            </div>
+          </details>
+          <input type="file" id="imp-file" accept=".csv,text/csv" hidden>
+          <a class="btn small" href="/api/report.html" target="_blank" rel="noopener">Printable report</a></span>
         </div>
       </div>
       <div class="row gap" id="move-bar" hidden>
@@ -464,7 +430,7 @@
 
   <section id="tab-locations" class="tab" hidden>
     <div class="card">
-      <h2 id="loc-form-title">Add location</h2>
+      <details class="add-form"><summary id="loc-form-title">Add location</summary>
       <p class="muted">Where things are kept: rooms and shelves at home, each vehicle, each person's go-bag,
         off-site stashes. Vehicles and go-bags get their own readiness score. Pick "Inside" to put a spot or
         container in another location (up to two levels, e.g. Bedroom &gt; Under bed &gt; Safe); it counts the same as the one it's in.</p>
@@ -479,10 +445,10 @@
         <label class="span2">Notes<input name="notes"></label>
         <div class="actions span-all"><button type="submit" class="primary">Save location</button>
           <button type="button" id="loc-cancel" hidden>Cancel edit</button></div>
-      </form>
+      </form></details>
     </div>
     <div class="card">
-      <h2>Locations</h2>
+      <div class="row"><h2>Locations</h2><div class="row-right"><a class="btn small" href="/api/labels.html" target="_blank" rel="noopener">Print bin labels</a></div></div>
       <div class="table-wrap"><table id="loc-table">
         <thead><tr><th>Name</th><th>Type</th><th>Items</th><th>Home supply</th><th>Kit score</th><th></th></tr></thead>
         <tbody></tbody>
@@ -510,28 +476,24 @@
   </section>
 
   <section id="tab-sites" class="tab" hidden>
+    <div class="card" id="station-card" hidden>
+      <h2>Weather station</h2>
+      <p class="muted">A weather station at home sends its readings here: they show on Home, and BUNKR warns from them with no
+        internet (pressure falling fast, strong gusts, heavy rain, heat, a freeze).</p>
+      <div id="station-body"></div>
+    </div>
     <div class="card" id="lw-card" hidden>
       <h2>Local watch</h2>
       <p class="muted">Every 10 minutes BUNKR looks for news about each family town (from the addresses below, plus any you add), and
-        trouble there is sent to everyone as "Near Jordan (Nederland)". It also reads public Bluesky posts, and Reddit once it has a key,
-        for early, unconfirmed reports (News tab, Unconfirmed).</p>
+        trouble there is sent to everyone as "Near Jordan (Nederland)".</p>
       <ul class="plain lw-places" id="lw-places"></ul>
       <form id="lw-form" class="form-grid">
         <label class="span2">Other towns to watch, one per line (like "Conifer, CO")<textarea name="extra_places" rows="2"></textarea></label>
-        <label class="check"><input type="checkbox" name="bluesky"> Read public Bluesky posts</label>
-        <label>Subreddits, one per line<textarea name="subreddits" rows="2" placeholder="Denver&#10;Colorado"></textarea></label>
-        <label>Reddit app id<input name="reddit_id" autocomplete="off" spellcheck="false"></label>
-        <label>Reddit app secret<input name="reddit_secret" type="password" autocomplete="off" placeholder="leave empty to keep it"></label>
-        <p class="muted span-all">Reddit: while logged in, open <a href="https://www.reddit.com/prefs/apps" target="_blank" rel="noopener">reddit.com/prefs/apps</a>,
-          "create another app", type <b>script</b>, any name, redirect uri <code>http://localhost</code>. The id is the short code under the
-          app's name; the secret is labelled "secret". BUNKR only reads.</p>
-        <div class="actions span-all"><button type="submit" class="primary">Save</button> <button type="button" id="lw-run">Check now</button>
-          <button type="button" class="link" id="lw-forget" hidden>Forget the Reddit secret</button></div>
+        <div class="actions span-all"><button type="submit" class="primary">Save</button> <button type="button" id="lw-run">Check now</button></div>
       </form>
-      <p class="muted" id="lw-status"></p>
     </div>
     <div class="card">
-      <h2 id="site-form-title">Add site</h2>
+      <details class="add-form"><summary id="site-form-title">Add site</summary>
       <p class="muted">Home, bug-out spots and relatives. The address is looked up once with the U.S. Census
         geocoder (or type coordinates). Each site gets its county's FEMA hazard ratings and live National
         Weather Service alerts, refreshed every 15 minutes.</p>
@@ -544,7 +506,7 @@
         <label class="span2">Notes<input name="notes"></label>
         <div class="actions span-all"><button type="submit" class="primary" id="site-save">Save site</button>
           <button type="button" id="site-cancel" hidden>Cancel edit</button></div>
-      </form>
+      </form></details>
     </div>
     <div class="card" id="maps-card" hidden>
       <div class="row"><h2>Offline maps</h2>
@@ -566,23 +528,11 @@
     <div id="site-cards"></div>
   </section>
 
-  <section id="tab-family" class="tab" hidden>
-    <div class="card">
-      <div class="row"><h2>Family plan</h2>
-        <div class="row-right"><a class="btn" href="/api/family-plan.html" target="_blank" rel="noopener">Print the family plan</a>
-          <a class="btn" href="/api/kids-plan.html" target="_blank" rel="noopener">Print the kids' plan</a></div></div>
-      <p class="muted">Meeting places come from Sites (types "meeting place"), radio channels from Comms ("In family plan"),
-        the rest from this page. The plan is also copied into every encrypted document archive and onto the Pi and laptop.</p>
-      <form id="planinfo-form" class="form-grid">
-        <label>Household name<input name="household_name" placeholder="The Smith family"></label>
-        <label class="span2">Mesh channel names<input name="mesh_channels" placeholder="MeshCore: #family (private), Meshtastic: LongFast"></label>
-        <label class="span-all">Notes for the plan<textarea name="notes" rows="3" placeholder="Pet plan, who picks up the kids, utility shut-off locations…"></textarea></label>
-        <div class="actions span-all"><button type="submit" class="primary">Save</button></div>
-      </form>
-    </div>
-    <div class="card" id="mesh-card">
-      <div class="row"><h2>Mesh check-ins (MeshCore)</h2><div id="mesh-state"></div></div>
-      <div id="mesh-join"></div>
+  <section id="tab-radios" class="tab" hidden>
+    <div class="card" id="mesh-setup-card" hidden>
+      <div class="row"><h2>Mesh radio (MeshCore)</h2></div>
+      <p class="muted">BUNKR connects to a MeshCore companion radio. Meshtastic radios can't connect to BUNKR yet (they use a
+        different protocol); Meshtastic firmware for your boards can still be kept offline under Downloads.</p>
       <div id="mesh-admin" hidden>
         <h3>The radio</h3>
         <p class="muted">A MeshCore companion radio on this machine: plugged into USB (a Pi: <code>/dev/ttyACM0</code> or
@@ -607,11 +557,13 @@
           <div class="form-grid">
             <label>Daily mesh brief at<input type="time" name="brief_at"><span class="muted">Weather at home, alerts and three
               headlines on the family channels. Empty: none.</span></label>
+            <label>Mesh news comes from<select name="brief_user"></select><span class="muted">The household brief ignores
+              everyone's "Not for me" and "Done with this". Or pick one person's brief.</span></label>
           </div>
           <div class="actions"><button type="submit" class="primary">Save</button></div>
         </form>
         <p class="muted">With radios on the hub and the Pi, let only one of them send calls and "needs help", or the family hears them twice.</p>
-        <h3>Nodes</h3>
+        <h3>MeshCore nodes</h3>
         <p class="muted">Every MeshCore node this radio has heard, by its public key. Say whose each one is: a channel message
           from that node's name then counts as that person, whatever the node is called. One person can have several.</p>
         <div id="mesh-nodes"></div>
@@ -629,7 +581,103 @@
       </div>
     </div>
     <div class="card">
+      <div class="row"><h2>Radios</h2>
+        <div class="row-right"><a class="btn" href="/api/radio/cards.html" target="_blank" rel="noopener">Print all channel cards</a>
+          <a class="btn" href="/api/radio/reference.html" target="_blank" rel="noopener">Reference sheet</a></div></div>
+      <p class="muted">Each radio gets a channel list, a CHIRP file (in CHIRP: File, Import, then Radio, Upload to radio),
+        a printable channel card, and a history of programming images you save from CHIRP. All of it is copied to the Pi
+        and laptop, so a radio can be reprogrammed with no internet.</p>
+      <details class="add-form"><summary>Add a radio</summary>
+      <form id="radio-form" class="form-grid">
+        <label>Name<input name="name" required placeholder="Dad's UV-5R"></label>
+        <label>Model<input name="model" placeholder="Baofeng UV-5R"></label>
+        <label>Type<select name="kind" id="radio-kind"></select></label>
+        <label>Service<select name="service"><option value="ham">Amateur (ham)</option><option value="gmrs">GMRS</option></select></label>
+        <label>Model profile<select name="profile" id="radio-profile"><option value="">None (pick channels by hand)</option></select></label>
+        <label>Owner<input name="owner" placeholder="Who carries it"></label>
+        <label>Kept at<select name="location_id" id="radio-location"></select></label>
+        <label>CHIRP driver<input name="chirp_driver" placeholder="e.g. Baofeng UV-5R"></label>
+        <label class="span2">Notes<input name="notes"></label>
+        <div class="actions span-all"><button type="submit" class="primary">Save radio</button>
+          <button type="button" id="radio-cancel" hidden>Cancel edit</button></div>
+      </form></details>
+      <div id="radio-cards"></div>
+    </div>
+    <div class="card">
+      <div class="row"><h2>Channels</h2>
+        <div class="row-right"><button id="ch-standard" title="GMRS/FRS 1-22, the GMRS repeater pairs, NOAA weather 1-7 and the 2 m and 70 cm calling channels">Add the common channels</button></div></div>
+      <p class="muted">The master plan: a slot number means the same channel on every radio. Radios with a model
+        profile are built from it automatically; a radio that can't use a channel leaves that slot empty.</p>
+      <p class="muted">"Add the common channels" adds the ones every GMRS or ham radio in the US can use: GMRS/FRS 1-22 and the
+        GMRS repeater pairs, NOAA weather 1-7 (listen only), and the 2 m and 70 cm calling frequencies. Channels you already
+        have aren't added twice. Tick "In family plan" for the channels everyone should know.</p>
+      <details class="add-form"><summary>Add a channel</summary>
+      <form id="ch-form" class="form-grid">
+        <label>Name<input name="name" required maxlength="20" placeholder="FAMILY"></label>
+        <label>Group<input name="grp" placeholder="Family"></label>
+        <label>Service<select name="service" id="ch-service"></select></label>
+        <label>Receive MHz<input name="rx_mhz" type="number" step="0.0001" required></label>
+        <label>Duplex<select name="duplex"><option value="">Simplex</option><option value="+">+ offset</option><option value="-">- offset</option>
+          <option value="split">Split (TX below)</option><option value="off">Receive only</option></select></label>
+        <label>Offset or TX MHz<input name="offset_mhz" type="number" step="0.0001" value="0"></label>
+        <label>Transmit tone<input name="tx_tone" placeholder="88.5 or D145N"></label>
+        <label>Receive tone<input name="rx_tone" placeholder="blank, 123.0 or D036N"></label>
+        <label>Plan slot<input name="slot" type="number" min="0" max="999" placeholder="blank = not in the plan"></label>
+        <label>Short name<input name="short" maxlength="16" placeholder="for 6-character displays"></label>
+        <label>System<input name="system" placeholder="CO Connection, Front Range GMRS…"></label>
+        <label>Status<select name="status"><option value="">Not checked</option><option value="verified">Verified</option>
+          <option value="confirm">To confirm</option><option value="hold">On hold (left out)</option><option value="down">Down</option></select></label>
+        <label class="check"><input type="checkbox" name="scan" checked> In scan</label>
+        <label class="check"><input type="checkbox" name="watch"> Watch list</label>
+        <label class="check"><input type="checkbox" name="rx_only"> Listen only</label>
+        <label class="check"><input type="checkbox" name="wiresx"> WIRES-X</label>
+        <label>Mode<select name="mode"><option>FM</option><option>NFM</option><option>AM</option><option>USB</option><option>LSB</option></select></label>
+        <label class="check"><input type="checkbox" name="in_plan"> In family plan</label>
+        <label class="span2">Notes<input name="notes"></label>
+        <div class="actions span-all"><button type="submit" class="primary">Save channel</button>
+          <button type="button" id="ch-cancel" hidden>Cancel edit</button></div>
+      </form></details>
+      <details><summary>Import repeaters (RepeaterBook or CHIRP CSV)</summary>
+        <div class="row gap"><input type="file" id="ch-import-file" accept=".csv,text/csv">
+          <input id="ch-import-group" value="Repeaters" placeholder="Group name"><button id="ch-import">Import</button></div>
+      </details>
+      <details id="ch-list-box"><summary id="ch-list-sum">Channel list</summary>
+        <label class="check"><input type="checkbox" id="ch-statewide"> Also show the statewide list (slots 200 and up: repeaters
+          across the state, for when you're traveling)</label>
+        <div class="table-wrap"><table id="ch-table">
+          <thead><tr><th>Slot</th><th>Name</th><th>System</th><th>RX MHz</th><th>TX</th><th>Tones</th><th>Plan</th><th></th></tr></thead><tbody></tbody>
+        </table></div>
+      </details>
+    </div>
+    <div class="card">
+      <h2>Mesh firmware (offline)</h2>
+      <p class="muted">Firmware files kept in the downloads store for your boards. Fetch them on the Downloads tab
+        (admins); the Pi and laptop carry copies and have the flashing tools installed.</p>
+      <div id="fw-boards"></div>
+    </div>
+    </section>
+  <section id="tab-family" class="tab" hidden>
+    <div class="card">
+      <div class="row"><h2>Family plan</h2>
+        <div class="row-right"><a class="btn" href="/api/family-plan.html" target="_blank" rel="noopener">Print the family plan</a>
+          <a class="btn" href="/api/kids-plan.html" target="_blank" rel="noopener">Print the kids' plan</a></div></div>
+      <details class="add-form"><summary>Edit the plan</summary>
+      <p class="muted">Meeting places come from Sites (types "meeting place"), radio channels from Mesh &amp; radios ("In family plan"),
+        the rest from here. The plan is also copied into every encrypted document archive and onto the Pi and laptop.</p>
+      <form id="planinfo-form" class="form-grid">
+        <label>Household name<input name="household_name" placeholder="The Smith family"></label>
+        <label class="span2">Mesh channel names<input name="mesh_channels" placeholder="MeshCore: #family (private), Meshtastic: LongFast"></label>
+        <label class="span-all">Notes for the plan<textarea name="notes" rows="3" placeholder="Pet plan, who picks up the kids, utility shut-off locations…"></textarea></label>
+        <div class="actions span-all"><button type="submit" class="primary">Save</button></div>
+      </form></details>
+    </div>
+    <div class="card" id="mesh-card">
+      <div class="row"><h2>Mesh check-ins (MeshCore)</h2><div id="mesh-state"></div></div>
+      <div id="mesh-join"></div>
+    </div>
+    <div class="card">
       <h2 id="person-form-title">Household members</h2>
+      <details class="add-form"><summary>Add a person</summary>
       <form id="person-form" class="form-grid">
         <label>Name<input name="name" required></label>
         <label>Adult or child<select name="role"><option value="adult">Adult</option><option value="child">Child</option></select></label>
@@ -650,12 +698,13 @@
         <label data-admin-field>Their login<select name="user_id" id="person-user"></select></label>
         <div class="actions span-all"><button type="submit" class="primary">Save person</button>
           <button type="button" id="person-cancel" hidden>Cancel edit</button></div>
-      </form>
+      </form></details>
       <div id="people-cards"></div>
     </div>
     <div class="card">
       <h2>Contacts</h2>
       <p class="muted">Mark one out-of-area contact: everyone checks in with them when local lines are jammed.</p>
+      <details class="add-form"><summary>Add a contact</summary>
       <form id="contact-form" class="form-grid">
         <label>Name<input name="name" required></label>
         <label>Relation<input name="relation"></label>
@@ -665,7 +714,7 @@
         <label class="span2">Notes<input name="notes"></label>
         <div class="actions span-all"><button type="submit" class="primary">Save contact</button>
           <button type="button" id="contact-cancel" hidden>Cancel edit</button></div>
-      </form>
+      </form></details>
       <div class="table-wrap"><table id="contact-table">
         <thead><tr><th>Name</th><th>Relation</th><th>Phone</th><th>Email</th><th></th></tr></thead><tbody></tbody></table></div>
     </div>
@@ -756,6 +805,18 @@
   </section>
 
   <section id="tab-comms" class="tab" hidden>
+    <div class="card" id="emergency-card">
+      <h2>In an emergency</h2>
+      <h3 id="lookup-title">Look it up</h3>
+      <form id="lookup-form" class="row gap"><input id="lookup-q" type="search" maxlength="200" placeholder="Search the offline library: burns, boil water, generator" aria-label="Search the offline library">
+        <button type="submit" class="primary">Search</button> <a class="btn" id="lookup-all" target="_blank" rel="noopener">All books</a></form>
+      <p class="muted" id="lookup-home" hidden>Books open on the home Wi-Fi.</p>
+      <ul class="plain lookup" id="lookup-out"></ul>
+      <h3>Where we meet</h3>
+      <ul id="home-places" class="plain"></ul>
+      <h3>Who to call</h3>
+      <ul id="home-contacts" class="plain"></ul>
+    </div>
     <div id="partner-cards"></div>
     <div class="card">
       <h2>Radio nets</h2>
@@ -857,97 +918,7 @@
         </form>
       </details>
     </div>
-    <div class="card" id="partner-setup" data-admin hidden>
-      <h2>Partner hubs</h2>
-      <p class="muted">For a trusted neighbor who runs their own BUNKR. Off until you set it up. A share never includes
-        firearms, medical, documents, money, supplies, or where anyone is.</p>
-      <h3>Share with a partner</h3>
-      <form id="share-form" class="form-grid">
-        <label>Who it's for<input name="name" required placeholder="The Garcias"></label>
-        <fieldset class="span-all profile"><legend>Includes</legend><div class="na-list" id="share-parts"></div></fieldset>
-        <div class="actions span-all"><button type="submit" class="primary">Make share</button></div>
-      </form>
-      <div id="share-new"></div>
-      <ul class="plan-list" id="share-list"></ul>
-      <h3>Read a partner's share</h3>
-      <form id="partner-form" class="form-grid">
-        <label>Name<input name="name" required placeholder="Garcia house"></label>
-        <label class="span2">Share address<input name="url" placeholder="https://their-bunkr/api/partner/…"></label>
-        <label class="span2">Token<input name="token" type="password" autocomplete="off" placeholder="blank = keep the saved one"></label>
-        <div class="actions span-all"><button type="submit" class="primary">Save partner</button>
-          <button type="button" id="partner-cancel" hidden>Cancel edit</button></div>
-      </form>
-      <ul class="plan-list" id="partner-list"></ul>
-    </div>
-    <div class="card">
-      <div class="row"><h2>Radios</h2>
-        <div class="row-right"><a class="btn" href="/api/radio/cards.html" target="_blank" rel="noopener">Print all channel cards</a>
-          <a class="btn" href="/api/radio/reference.html" target="_blank" rel="noopener">Reference sheet</a></div></div>
-      <p class="muted">Each radio gets a channel list, a CHIRP file (in CHIRP: File, Import, then Radio, Upload to radio),
-        a printable channel card, and a history of programming images you save from CHIRP. All of it is copied to the Pi
-        and laptop, so a radio can be reprogrammed with no internet.</p>
-      <form id="radio-form" class="form-grid">
-        <label>Name<input name="name" required placeholder="Dad's UV-5R"></label>
-        <label>Model<input name="model" placeholder="Baofeng UV-5R"></label>
-        <label>Type<select name="kind" id="radio-kind"></select></label>
-        <label>Service<select name="service"><option value="ham">Amateur (ham)</option><option value="gmrs">GMRS</option></select></label>
-        <label>Model profile<select name="profile" id="radio-profile"><option value="">None (pick channels by hand)</option></select></label>
-        <label>Owner<input name="owner" placeholder="Who carries it"></label>
-        <label>CHIRP driver<input name="chirp_driver" placeholder="e.g. Baofeng UV-5R"></label>
-        <label class="span2">Notes<input name="notes"></label>
-        <div class="actions span-all"><button type="submit" class="primary">Save radio</button>
-          <button type="button" id="radio-cancel" hidden>Cancel edit</button></div>
-      </form>
-      <div id="radio-cards"></div>
-    </div>
-    <div class="card">
-      <div class="row"><h2>Channels</h2>
-        <div class="row-right"><label class="check"><input type="checkbox" id="ch-statewide"> Show statewide (200+)</label>
-          <button id="ch-standard">Add standard channels</button></div></div>
-      <p class="muted">The master plan: a slot number means the same channel on every radio. Radios with a model
-        profile are built from it automatically; a radio that can't use a channel leaves that slot empty.</p>
-      <p class="muted">Standard set: GMRS/FRS 1-22 and the GMRS repeater channels, NOAA weather 1-7 (receive only), and the
-        2 m and 70 cm calling frequencies. Tick "In family plan" for the channels everyone should know.</p>
-      <form id="ch-form" class="form-grid">
-        <label>Name<input name="name" required maxlength="20" placeholder="FAMILY"></label>
-        <label>Group<input name="grp" placeholder="Family"></label>
-        <label>Service<select name="service" id="ch-service"></select></label>
-        <label>Receive MHz<input name="rx_mhz" type="number" step="0.0001" required></label>
-        <label>Duplex<select name="duplex"><option value="">Simplex</option><option value="+">+ offset</option><option value="-">- offset</option>
-          <option value="split">Split (TX below)</option><option value="off">Receive only</option></select></label>
-        <label>Offset or TX MHz<input name="offset_mhz" type="number" step="0.0001" value="0"></label>
-        <label>Transmit tone<input name="tx_tone" placeholder="88.5 or D145N"></label>
-        <label>Receive tone<input name="rx_tone" placeholder="blank, 123.0 or D036N"></label>
-        <label>Plan slot<input name="slot" type="number" min="0" max="999" placeholder="blank = not in the plan"></label>
-        <label>Short name<input name="short" maxlength="16" placeholder="for 6-character displays"></label>
-        <label>System<input name="system" placeholder="CO Connection, Front Range GMRS…"></label>
-        <label>Status<select name="status"><option value="">Not checked</option><option value="verified">Verified</option>
-          <option value="confirm">To confirm</option><option value="hold">On hold (left out)</option><option value="down">Down</option></select></label>
-        <label class="check"><input type="checkbox" name="scan" checked> In scan</label>
-        <label class="check"><input type="checkbox" name="watch"> Watch list</label>
-        <label class="check"><input type="checkbox" name="rx_only"> Listen only</label>
-        <label class="check"><input type="checkbox" name="wiresx"> WIRES-X</label>
-        <label>Mode<select name="mode"><option>FM</option><option>NFM</option><option>AM</option><option>USB</option><option>LSB</option></select></label>
-        <label class="check"><input type="checkbox" name="in_plan"> In family plan</label>
-        <label class="span2">Notes<input name="notes"></label>
-        <div class="actions span-all"><button type="submit" class="primary">Save channel</button>
-          <button type="button" id="ch-cancel" hidden>Cancel edit</button></div>
-      </form>
-      <details><summary>Import repeaters (RepeaterBook or CHIRP CSV)</summary>
-        <div class="row gap"><input type="file" id="ch-import-file" accept=".csv,text/csv">
-          <input id="ch-import-group" value="Repeaters" placeholder="Group name"><button id="ch-import">Import</button></div>
-      </details>
-      <div class="table-wrap"><table id="ch-table">
-        <thead><tr><th>Slot</th><th>Name</th><th>System</th><th>RX MHz</th><th>TX</th><th>Tones</th><th>Plan</th><th></th></tr></thead><tbody></tbody>
-      </table></div>
-    </div>
-    <div class="card">
-      <h2>Mesh firmware (offline)</h2>
-      <p class="muted">Firmware files kept in the downloads store for your boards. Fetch them on the Downloads tab
-        (admins); the Pi and laptop carry copies and have the flashing tools installed.</p>
-      <div id="fw-boards"></div>
-    </div>
-  </section>
+</section>
 
   <section id="tab-documents" class="tab" hidden>
     <div class="card">
@@ -955,6 +926,7 @@
       <p class="muted">Register files or folders (scans of IDs, policies, deeds, medical records).
         They're copied to the USB kit in an encrypted 7-Zip archive, highest priority first.
         Nothing is moved or changed in place.</p>
+      <details class="add-form"><summary>Register a document</summary>
       <form id="doc-form" class="form-grid">
         <label class="span2">File or folder path<input name="path" id="doc-path" required placeholder="/home/you/Documents/Insurance"></label>
         <div class="actions"><button type="button" id="doc-browse">Browse...</button></div>
@@ -971,7 +943,7 @@
           on the maintenance list or given a new date.</p>
         <div class="actions span-all"><button type="submit" class="primary" id="doc-submit">Add document</button>
           <button type="button" class="link" id="doc-cancel" hidden>Cancel</button></div>
-      </form>
+      </form></details>
     </div>
     <div class="card">
       <h2>Coverage</h2>
@@ -1057,7 +1029,7 @@
 
   <section id="tab-nodes" class="tab" hidden>
     <div class="card">
-      <h2 id="node-form-title">Add node</h2>
+      <details class="add-form"><summary id="node-form-title">Add node</summary>
       <p class="muted">Everything that carries a copy of BUNKR: the Pi, the storage laptop, kit drives (added
         automatically when a kit is built). Each gets a storage budget and a profile; the planner fills it
         from the downloads store, most important first.</p>
@@ -1082,7 +1054,7 @@
         <label class="span2">Notes<input name="notes"></label>
         <div class="actions span-all"><button type="submit" class="primary">Save node</button>
           <button type="button" id="node-cancel" hidden>Cancel edit</button></div>
-      </form>
+      </form></details>
     </div>
     <div class="card" id="conflicts-card" hidden>
       <h2>Sync conflicts</h2>
@@ -1237,28 +1209,51 @@
     </div>
   </section>
 
-  <section id="tab-household" class="tab" hidden>
-    <div class="card">
-      <h2>Household</h2>
-      <p class="muted">Targets follow Ready.gov: 1 gallon of water per person per day, at least 3 days to evacuate
-        and 2 weeks for sheltering at home.</p>
-      <p id="household-from-people" class="muted" hidden>Adults and children come from the household members on the Family tab.</p>
-      <form id="settings-form" class="form-grid">
-        <label>Adults<input name="adults" type="number" min="0"></label>
-        <label>Children<input name="children" type="number" min="0"></label>
-        <label>Pets<input name="pets" type="number" min="0"></label>
-        <label>Target days of supply<input name="target_days" type="number" min="1"></label>
-        <label>Water gal / person / day<input name="water_gal_per_person" type="number" step="0.1" min="0"></label>
-        <label>Water gal / pet / day<input name="water_gal_per_pet" type="number" step="0.1" min="0"></label>
-        <label>Calories / person / day<input name="kcal_per_person" type="number" step="50" min="0"></label>
-        <label>Cash / person ($, small bills)<input name="cash_per_person" type="number" step="10" min="0"></label>
-        <div class="actions span-all"><button type="submit" class="primary">Save</button></div>
-      </form>
+  <section id="tab-account" class="tab" hidden>
+    <div class="card" id="me-card">
+      <h2>Me</h2>
+      <dl class="me-facts">
+        <dt>Name</dt><dd id="me-person-name"></dd>
+        <dt>Callsign</dt><dd id="me-person-call"></dd>
+        <dt>Login</dt><dd id="me-login"></dd>
+      </dl>
+      <p class="warn" id="me-unlinked" hidden></p>
+      <p><button type="button" id="account-logout">Log out</button></p>
     </div>
-    <div class="card">
-      <h2>Checklist items that don't apply</h2>
-      <p class="muted">Tick anything your household doesn't need (e.g. infant supplies). It's removed from scoring.</p>
-      <div id="na-list" class="na-list"></div>
+    <div class="card" id="push-card" hidden>
+      <h2>Notifications on this phone</h2>
+      <div class="row-right"><button id="push-toggle" class="primary"></button> <button id="push-test" hidden>Send a test</button></div>
+      <p class="muted" id="push-status"></p>
+      <p class="muted" id="push-ios" hidden>On iPhone: tap Share, then <strong>Add to Home Screen</strong>. Open BUNKR from the
+        Home Screen and turn notifications on there (iOS 16.4 or later).</p>
+      <form id="push-prefs" class="form-grid">
+        <p class="muted span-all">Always on: "Act now" alerts at your places, family calls, and anyone who needs help. They come
+          through quiet hours too.</p>
+        <label class="check"><input type="checkbox" name="priority"> "Soon / near you" alerts</label>
+        <label>Up to this many a day<input type="number" name="priority_cap" min="0" max="20"></label>
+        <label>Family check-ins<select name="checkins" id="push-checkins"></select></label>
+        <label class="check"><input type="checkbox" name="brief"> Morning brief</label>
+        <label>Quiet from<input type="time" name="quiet_start"></label>
+        <label>Quiet until<input type="time" name="quiet_end"></label>
+        <label>Reminders (documents, medicine)<select name="reminders_by" id="push-reminders"></select></label>
+        <label>My email<input type="email" name="email" autocomplete="email" placeholder="for reminders by email"></label>
+        <p class="muted span-all" id="push-email-note" hidden></p>
+        <p class="muted span-all">Everything also shows under the bell at the top, even during quiet hours.</p>
+        <div class="actions span-all"><button type="submit">Save</button></div>
+      </form>
+      <div id="app-section" hidden>
+      <h3>BUNKR phone app</h3>
+      <p id="app-download" hidden><a id="app-download-link" href="/app/bunkr.apk" download>Download the Android app</a>
+        <span class="muted" id="app-download-note"></span></p>
+      <div class="row-right"><button id="app-pair">Pair the BUNKR app</button></div>
+      <div id="app-pair-box" hidden>
+        <p class="muted">In the BUNKR app, choose "Pair" and scan this. It works once and stops working in a few minutes.</p>
+        <div id="app-qr"></div>
+        <p>Or type this code: <strong id="app-code"></strong></p>
+        <p class="muted" id="app-code-note"></p>
+      </div>
+      <div id="app-phones"></div>
+      </div>
     </div>
     <div class="card" id="mypw-card" hidden>
       <h2>Change my password</h2>
@@ -1290,6 +1285,40 @@
         <ul class="recovery-codes" id="ts-code-list"></ul>
         <button type="button" id="ts-codes-done">Done</button>
       </div>
+    </div>
+  </section>
+
+  <section id="tab-household" class="tab" hidden>
+    <div class="card" id="news-sources-card" data-admin-field hidden>
+      <h2>News sources</h2>
+      <p class="muted">The outlets BUNKR reads for everyone. One that's off isn't fetched at all. Each person can also hide
+        outlets just for themselves under News, "Choose what I see".</p>
+      <form id="news-sources-form">
+        <div id="news-sources" class="src-groups"></div>
+        <div class="actions"><button type="submit" class="primary">Save</button></div>
+      </form>
+    </div>
+    <div class="card">
+      <h2>Household</h2>
+      <p class="muted">Targets follow Ready.gov: 1 gallon of water per person per day, at least 3 days to evacuate
+        and 2 weeks for sheltering at home.</p>
+      <p id="household-from-people" class="muted" hidden>Adults and children come from the household members on the Family tab.</p>
+      <form id="settings-form" class="form-grid">
+        <label>Adults<input name="adults" type="number" min="0"></label>
+        <label>Children<input name="children" type="number" min="0"></label>
+        <label>Pets<input name="pets" type="number" min="0"></label>
+        <label>Target days of supply<input name="target_days" type="number" min="1"></label>
+        <label>Water gal / person / day<input name="water_gal_per_person" type="number" step="0.1" min="0"></label>
+        <label>Water gal / pet / day<input name="water_gal_per_pet" type="number" step="0.1" min="0"></label>
+        <label>Calories / person / day<input name="kcal_per_person" type="number" step="50" min="0"></label>
+        <label>Cash / person ($, small bills)<input name="cash_per_person" type="number" step="10" min="0"></label>
+        <div class="actions span-all"><button type="submit" class="primary">Save</button></div>
+      </form>
+    </div>
+    <div class="card">
+      <h2>Checklist items that don't apply</h2>
+      <p class="muted">Tick anything your household doesn't need (e.g. infant supplies). It's removed from scoring.</p>
+      <div id="na-list" class="na-list"></div>
     </div>
     <div class="card" id="ha-card" hidden>
       <h2>Home Assistant</h2>
@@ -1450,12 +1479,13 @@
           <option value="everyone">Everyone</option></select></label>
       <p class="muted">Admins can do everything. Family logins can use inventory, locations, kits, shopping and sites,
         but not documents, drives, backups, nodes or downloads.</p>
+      <details class="add-form"><summary>Add a login</summary>
       <form id="user-form" class="form-grid">
         <label>Username<input name="username" required autocapitalize="none"></label>
         <label>Password<input type="password" name="password" minlength="10" required autocomplete="new-password"></label>
         <label>Role<select name="role"><option value="family">Family</option><option value="admin">Admin</option></select></label>
         <div class="actions"><button type="submit" class="primary">Add login</button></div>
-      </form>
+      </form></details>
       <div class="table-wrap"><table id="users-table">
         <thead><tr><th>Username</th><th>Role</th><th>Screens</th><th>Two-step</th><th>Last login</th><th></th></tr></thead><tbody></tbody>
       </table></div>
@@ -1471,6 +1501,28 @@
       <div class="table-wrap"><table id="audit-table">
         <thead><tr><th>When</th><th>Who</th><th>What</th><th>From</th></tr></thead><tbody></tbody>
       </table></div>
+    </div>
+      <div class="card" id="partner-setup" data-admin hidden>
+      <h2>Partner hubs</h2>
+      <p class="muted">For a trusted neighbor who runs their own BUNKR. Off until you set it up. A share never includes
+        firearms, medical, documents, money, supplies, or where anyone is.</p>
+      <h3>Share with a partner</h3>
+      <form id="share-form" class="form-grid">
+        <label>Who it's for<input name="name" required placeholder="The Garcias"></label>
+        <fieldset class="span-all profile"><legend>Includes</legend><div class="na-list" id="share-parts"></div></fieldset>
+        <div class="actions span-all"><button type="submit" class="primary">Make share</button></div>
+      </form>
+      <div id="share-new"></div>
+      <ul class="plan-list" id="share-list"></ul>
+      <h3>Read a partner's share</h3>
+      <form id="partner-form" class="form-grid">
+        <label>Name<input name="name" required placeholder="Garcia house"></label>
+        <label class="span2">Share address<input name="url" placeholder="https://their-bunkr/api/partner/…"></label>
+        <label class="span2">Token<input name="token" type="password" autocomplete="off" placeholder="blank = keep the saved one"></label>
+        <div class="actions span-all"><button type="submit" class="primary">Save partner</button>
+          <button type="button" id="partner-cancel" hidden>Cancel edit</button></div>
+      </form>
+      <ul class="plan-list" id="partner-list"></ul>
     </div>
   </section>
 </main>
@@ -1494,6 +1546,25 @@
   <textarea id="paste-text" rows="8"></textarea>
   <div class="actions"><button type="button" id="paste-preview" class="primary">Preview</button><button type="button" id="paste-close">Close</button></div>
   <div id="paste-rows"></div>
+</dialog>
+<dialog id="imp-dialog">
+  <h2>Import inventory</h2>
+  <p class="muted">Check which column goes where. Nothing is saved until you press Import.</p>
+  <div id="imp-map" class="imp-map"></div>
+  <div id="imp-dups" class="row gap" hidden>
+    <span id="imp-dup-text"></span>
+    <select id="imp-mode"><option value="add">Add to the quantity</option><option value="overwrite">Overwrite</option><option value="new">Add as new item</option></select>
+  </div>
+  <p id="imp-summary"></p>
+  <div class="table-wrap"><table id="imp-table"></table></div>
+  <div class="actions"><button type="button" id="imp-go" class="primary">Import</button><button type="button" id="imp-cancel">Cancel</button></div>
+</dialog>
+<dialog id="imp-dup-dialog">
+  <h2>We found duplicates</h2>
+  <p id="imp-dup-msg"></p>
+  <p class="muted">Same name, place and expiry date. How do you want to handle them? You can change single rows after.</p>
+  <div class="actions"><button type="button" class="primary" data-dup="add">Add to the quantity</button>
+    <button type="button" data-dup="overwrite">Overwrite</button><button type="button" data-dup="new">Add as new item</button></div>
 </dialog>
 <dialog id="browse-dialog">
   <div class="row"><strong id="browse-path"></strong><button id="browse-close" aria-label="Close">Close</button></div>

@@ -23,6 +23,7 @@ import urllib.request
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 USER_AGENT = "Mozilla/5.0 (compatible; BUNKR flight follow)"
 ADSB = "https://api.adsb.lol/v2/"
@@ -124,24 +125,143 @@ def home_airport(lat, lon, max_km=150):
 
 
 # ---------- flight numbers ----------
+def _norm(s):
+    return re.sub(r"[^a-z0-9]", "", s.lower())
+
+
+# Other ways people say an airline: normalized name -> ticket code. The names in AIRLINES count too.
+NAMES = {_norm(v[1]): k for k, v in AIRLINES.items()}
+NAMES.update({_norm(n): c for n, c in {
+    "southwest airlines": "WN", "united airlines": "UA", "american airlines": "AA", "delta air lines": "DL",
+    "delta airlines": "DL", "alaska airlines": "AS", "frontier airlines": "F9", "spirit airlines": "NK",
+    "allegiant air": "G4", "hawaiian airlines": "HA", "sun country airlines": "SY", "breeze airways": "MX",
+    "jet blue": "B6", "jetblue airways": "B6", "skywest airlines": "OO", "horizon air": "QX", "air canada": "AC",
+    "west jet": "WS", "virgin": "VS", "air france": "AF", "lufthansa german airlines": "LH", "qatar": "QR"}.items()})
+# Codes people often type for an airline whose real code is different: typed -> the airlines they probably meant.
+WRONG_CODES = {"SW": ["WN"], "SO": ["WN"], "JB": ["B6"], "FT": ["F9"], "FF": ["F9"], "FS": ["F9"], "DA": ["DL"],
+               "AK": ["AS"], "SP": ["NK"], "UN": ["UA"], "AL": ["AS", "AA"]}
+# Real codes that are often typed for another airline: always ask.
+ASK_ALWAYS = {"FR": ["FR", "F9"]}
+
+
+class Unsure(ValueError):
+    """A flight entry BUNKR won't track until the person picks: it guessed, changed something, or found no match.
+    .options are parse results to pick from (maybe none); str() is the plain question to show."""
+
+    def __init__(self, message, options=()):
+        super().__init__(message)
+        self.options = list(options)
+
+
+def _option(iata, num, dest=""):
+    icao, name = AIRLINES[iata]
+    return {"ident": iata + num, "callsign": icao + num, "airline": name, **({"dest": dest} if dest else {})}
+
+
+def describe(opt):
+    """'Southwest (WN) 2496'"""
+    return f"{opt['airline']} ({opt['ident'][:2]}) {opt['ident'][2:]}"
+
+
+def _unsure(typed, iatas, num, dest, found=False):
+    opts = [_option(i, num, dest) for i in iatas]
+    typed = typed.strip()[:30]
+    if opts and not found:
+        return Unsure("Did you mean " + " or ".join(describe(o) for o in opts) + "?", opts)
+    if opts:
+        return Unsure(f"Couldn't find {typed}. Did you mean " + " or ".join(describe(o) for o in opts) + "?", opts)
+    return Unsure(f"Couldn't find {typed}. Type it like United 1234 or UA 1234.")
+
+
 def parse_number(text):
-    """'UA 1234', 'ua1234' or 'UAL1234' -> {"ident": "UA1234", "callsign": "UAL1234", "airline": "United"}.
-    'UA 1234 to LAX' also gives "dest": "LAX"."""
-    text, _, to = (text or "").upper().partition(" TO ")
+    """'UA 1234', 'ua1234', 'UAL1234' or 'United 1234' -> {"ident": "UA1234", "callsign": "UAL1234", "airline": "United"}.
+    'UA 1234 to LAX' also gives "dest": "LAX". Raises Unsure (a ValueError) when the entry isn't clear: a wrong or
+    mixed-up code ('SW 2496', 'FR 1234'), a half-typed name, or an airline we don't know."""
+    raw = (text or "").strip()
+    text, _, to = raw.upper().partition(" TO ")
     dest = to.strip() if airport(to.strip()) else ""
     if to.strip() and not dest:
         raise ValueError(f"no airport called {to.strip()[:10]}: use its 3-letter code, like DEN")
+    typed = text.strip()
     s = re.sub(r"[\s-]+", "", text)
-    m = re.fullmatch(r"([A-Z]{3})(\d{1,4}[A-Z]?)", s) or re.fullmatch(r"([A-Z][A-Z0-9]|[0-9][A-Z])(\d{1,4}[A-Z]?)", s)
-    if not m:
-        raise ValueError("type the flight like UA 1234")
-    code, num = m.groups()
     extra = {"dest": dest} if dest else {}
-    if len(code) == 3:
+    m = re.fullmatch(r"([A-Z]{3})(\d{1,4}[A-Z]?)", s)
+    if m:  # a callsign: a known one fills in the ticket code; an unknown one is taken as typed
+        code, num = m.groups()
         iata, name = BY_ICAO.get(code, ("", ""))
+        if not iata and _norm(code) in NAMES:
+            return _option(NAMES[_norm(code)], num, dest)
         return {"ident": (iata + num) if iata else code + num, "callsign": code + num, "airline": name, **extra}
-    icao, name = AIRLINES.get(code, ("", ""))
-    return {"ident": code + num, "callsign": (icao + num) if icao else "", "airline": name, **extra}
+    m = re.fullmatch(r"([A-Z][A-Z0-9]|[0-9][A-Z])(\d{1,4}[A-Z]?)", s)
+    if m:
+        code, num = m.groups()
+        if code in ASK_ALWAYS:
+            raise _unsure(typed, ASK_ALWAYS[code], num, dest)
+        if code in AIRLINES:
+            return _option(code, num, dest)
+        if code in WRONG_CODES:
+            raise _unsure(typed, WRONG_CODES[code], num, dest)
+        near = [k for k, v in AIRLINES.items() if _norm(v[1]).startswith(code.lower())][:3]
+        raise _unsure(typed, near, num, dest, found=True)
+    m = re.fullmatch(r"(.*?[A-Z].*?)[\s-]*(\d{1,4}[A-Z]?)", text.strip())
+    if not m:
+        raise ValueError("type the flight like United 1234 or UA 1234")
+    word, num = _norm(m.group(1)), m.group(2)
+    if word in NAMES:
+        return _option(NAMES[word], num, dest)
+    near = list(dict.fromkeys(c for n, c in NAMES.items() if len(word) >= 2 and n.startswith(word)))[:3]
+    raise _unsure(typed, near, num, dest, found=not near)
+
+
+def ask(store, number, key=None, get=None, when=None):
+    """None when this flight can be tracked as typed. Otherwise {"message", "options": [{"label", "number", "callsign"}]}
+    for the person to pick from before anything is tracked. Looks the flight up (FlightAware, if set up) to say where it
+    goes, and to catch FlightAware naming a different flight than the one typed."""
+    get = get or _get_json
+    when = when or now()
+    try:
+        n = parse_number(number)
+        opts, message = [n], None
+    except Unsure as u:
+        opts, message = u.options, str(u)
+        if not opts:
+            return {"message": message, "options": []}
+    out, changed = [], False
+    for o in opts:
+        seen = _lookup(store, o, key, get, when)
+        callsign = o["callsign"]
+        if seen and seen.get("atc_ident") and seen["atc_ident"] != callsign:
+            callsign, changed = seen["atc_ident"], True
+        label = describe(o)
+        bits = []
+        if seen:
+            bits.append(" to ".join(_where(c) for c in (seen.get("origin"), seen.get("dest")) if c))
+            t = _parse(seen.get("estimated_out") or seen.get("scheduled_out"))
+            if t:
+                try:
+                    t = t.astimezone(ZoneInfo(seen["origin_tz"])) if seen.get("origin_tz") else t
+                except Exception:
+                    pass
+                bits.append(t.strftime("%-I:%M %p"))
+        out.append({"label": ", ".join([label] + [b for b in bits if b]), "number": o["ident"] + (f" to {o['dest']}" if o.get("dest") else ""),
+                    "callsign": callsign})
+    if message is None and not changed:
+        return None
+    if message is None:
+        message = "FlightAware has this as a different flight. Did you mean " + out[0]["label"] + "?"
+    return {"message": message, "options": out}
+
+
+def _lookup(store, o, key, get, when):
+    """FlightAware's view of one parsed flight, or {} (no key, over the cap, nothing found, or it failed)."""
+    if not key or lookups_this_month(store, when) >= MONTHLY_CAP:
+        return {}
+    f = {"ident": o["ident"], "callsign": o["callsign"], "origin": "", "started_at": _iso(when)}
+    try:
+        _count_lookup(store, when)
+        return flightaware(f, key, get, when)
+    except Exception:
+        return {}
 
 
 # ---------- storage ----------
@@ -168,24 +288,33 @@ def get(store, uid):
     return _row(rows[0]) if rows else None
 
 
-def add(store, person_uid, number, origin="", dest="", by="", home=None):
+def add(store, person_uid, number, origin="", dest="", by="", home=None, callsign=""):
     """Start following someone's flight. Any flight they were already on is ended. With no destination given, it's
-    taken to be home's airport (unless they're leaving from it); FlightAware corrects it when set up."""
+    taken to be home's airport (unless they're leaving from it), and marked as a guess until FlightAware confirms it.
+    callsign is one the person picked from a "Did you mean" question; without it the callsign is only what was typed."""
     p = store._rows("SELECT uid, name FROM people WHERE uid=?", (person_uid or "",))
     if not p:
         raise ValueError("unknown person")
     n = parse_number(number)
+    told = {}
+    if callsign:
+        callsign = callsign.strip().upper()
+        if not re.fullmatch(r"[A-Z0-9]{3,8}", callsign):
+            raise ValueError("that flight doesn't look right")
+        n["callsign"] = callsign
+        told["confirmed"] = True
     origin = origin.upper() if airport(origin) else ""
     dest = dest.upper() if airport(dest) else n.get("dest", "")
     if not dest and home and home["iata"] != origin:
         dest = home["iata"]
+        told["dest_guess"] = True
     t = _iso(now())
     for old in store._rows("SELECT uid FROM flights WHERE person_uid=? AND ended_at=''", (p[0]["uid"],)):
         end(store, old["uid"], "a new flight")
     rec = {"uid": uuid.uuid4().hex, "person_uid": p[0]["uid"], "person_name": p[0]["name"], "ident": n["ident"],
            "callsign": n["callsign"], "airline": n["airline"], "origin": origin, "dest": dest, "started_at": t,
            "started_by": (by or "")[:80], "updated_at": t, "ended_at": "", "ended_why": "", "status": "added",
-           "info": "{}", "pos": "{}", "aero_at": "", "told": "{}"}
+           "info": "{}", "pos": "{}", "aero_at": "", "told": json.dumps(told)}
     store._exec(f"INSERT INTO flights({', '.join(FIELDS)}) VALUES({', '.join('?' for _ in FIELDS)})", tuple(rec[f] for f in FIELDS))
     return get(store, rec["uid"])
 
@@ -246,7 +375,7 @@ def _count_lookup(store, when=None):
 def adsb(f, get=_get_json, when=None):
     """Where the plane is now (adsb.lol), by callsign, else by tail number. {} if it isn't being heard."""
     info = f["info"]
-    tries = [("callsign", c) for c in dict.fromkeys(x for x in (info.get("atc_ident"), f["callsign"]) if x)]
+    tries = [("callsign", f["callsign"])] if f["callsign"] else []  # never FlightAware's ident unless the person picked it
     if info.get("registration"):
         tries.append(("reg", info["registration"]))
     for kind, value in tries:
@@ -257,8 +386,25 @@ def adsb(f, get=_get_json, when=None):
             alt = a.get("alt_baro")
             seen = (when or now()) - timedelta(seconds=float(a.get("seen_pos", a.get("seen", 0)) or 0))
             return {"lat": round(a["lat"], 4), "lon": round(a["lon"], 4), "alt_ft": 0 if alt == "ground" else alt,
-                    "ground": alt == "ground", "gs_kt": a.get("gs"), "track": a.get("track"), "seen_at": _iso(seen)}
+                    "ground": alt == "ground", "gs_kt": a.get("gs"), "track": a.get("track"), "seen_at": _iso(seen),
+                    "by": kind}
     return {}
+
+
+def own_position(f, pos, when):
+    """Is this position the flight itself? A tail-number match before FlightAware reports departure is usually the
+    plane still flying its inbound leg under another flight number, unless it's moving at the origin near departure."""
+    if not pos:
+        return False
+    if pos.get("by") != "reg":
+        return True
+    info = f["info"]
+    if info.get("actual_out") or info.get("actual_off"):
+        return True
+    o = airport(f["origin"])
+    dep = _parse(info.get("estimated_out")) or _parse(info.get("scheduled_out"))
+    return bool(o and dep and abs(when - dep) <= timedelta(minutes=30) and (pos.get("gs_kt") or 0) >= 5
+                and km(pos["lat"], pos["lon"], o["lat"], o["lon"]) < 5)
 
 
 def _pick(flights, f, when):
@@ -314,15 +460,120 @@ def faa(code, get=_get_json, cache=None):
     data = get(FAA + code)
     out = {}
     if data.get("Delay"):
-        bits = []
+        raw, plain = [], []
         for s in data.get("Status") or []:
             kind = s.get("Type") or ""
             why = s.get("Reason") or ""
             avg = s.get("AvgDelay") or s.get("MaxDelay") or s.get("ClosureEnd") or ""
-            bits.append(" ".join(x for x in (kind, avg and f"({avg})", why and f"- {why}") if x))
-        out = {"delay": True, "text": "; ".join(b for b in bits if b)[:300] or "Delays reported"}
+            raw.append(" ".join(x for x in (kind, avg and f"({avg})", why and f"- {why}") if x))
+            line = faa_line(code, s)
+            if line:
+                plain.append(line)
+        # only entries that touch airline flights are shown; the FAA's own words always stay under "details"
+        if plain:
+            out = {"delay": True, "text": "; ".join(plain)[:300], "lines": plain,
+                   "raw": "; ".join(b for b in raw if b)[:600]}
     cache[code] = out
     return out
+
+
+# ---------- FAA notices in plain English ----------
+ABBREV = {"CLSD": "closed", "CLSD.": "closed", "ACFT": "aircraft", "EXC": "except", "PPR": "prior permission required",
+          "AD": "airport", "AP": "airport", "RWY": "runway", "TWY": "taxiway", "TFC": "traffic", "NON": "non",
+          "SKED": "scheduled", "UNSKED": "unscheduled", "TRANSIENT": "transient", "GA": "general aviation",
+          "TO": "to", "WIP": "work in progress", "MAINT": "maintenance", "OBST": "obstruction", "U/S": "out of service",
+          "UNAVBL": "unavailable", "AVBL": "available", "TEMP": "temporary", "ARR": "arrivals", "DEP": "departures",
+          "WX": "weather", "TSTM": "thunderstorms", "VOL": "volume", "RWY.": "runway", "FLT": "flight", "FLTS": "flights",
+          "APCH": "approach", "ILS": "instrument landing system", "NOTAM": "notice", "ARPT": "airport", "SVC": "service",
+          "REQ": "required", "RSTD": "restricted", "ACTVT": "activated", "DLA": "delay", "DLAS": "delays", "EQP": "equipment"}
+
+
+def expand(text):
+    """Spell out common FAA / NOTAM shorthand (offline list)."""
+    words = [ABBREV.get(w.upper().strip(",;"), w) for w in (text or "").split()]
+    return " ".join(w for w in words if w)
+
+
+def _private_only(s):
+    kind = (s.get("Type") or "").upper()
+    if "GROUND STOP" in kind or "DELAY" in kind:
+        return False  # real delays and stops affect airlines
+    blob = " ".join(str(s.get(k) or "") for k in ("Type", "Reason", "Text")).upper().replace(",", " ").replace(".", " ")
+    toks = set(blob.split())
+    return bool(toks & {"GA", "UNSKED", "TRANSIENT", "PRIVATE"}) or "NON SKED" in blob or "NON-SKED" in blob
+
+
+def faa_line(code, s):
+    """One short readable line for an FAA status entry, or '' if it doesn't affect airline flights."""
+    if _private_only(s):
+        return ""
+    kind = (s.get("Type") or "").strip()
+    k = kind.lower()
+    why = expand(s.get("Reason") or "").strip().rstrip(".").lower()
+    avg = (s.get("AvgDelay") or s.get("MaxDelay") or "").strip()
+    end = (s.get("EndTime") or s.get("ClosureEnd") or "").strip()
+    tail = f" ({why})" if why else ""
+    if "ground stop" in k:
+        return f"{code}: ground stop" + (f" until {end}" if end else "") + tail
+    if "clos" in k:
+        return f"{code}: airport closed" + (f" until {end}" if end else "") + tail
+    if "arriv" in k:
+        what = "arrivals"
+    elif "depart" in k:
+        what = "departures"
+    elif "ground delay" in k:
+        what = "arrivals"
+    else:
+        what = "flights"
+    if what == "flights" and not avg and not kind:
+        return ""
+    return f"{code}: {what} delayed" + (f" about {_nice_delay(avg)}" if avg else "") + tail
+
+
+def _nice_delay(avg):
+    a = avg.lower().replace("minutes", "min").replace("minute", "min").replace("hours", "hr").replace("hour", "hr")
+    return " ".join(a.split())
+
+
+def _zone(name):
+    import zoneinfo
+    try:
+        return zoneinfo.ZoneInfo(name) if name else None
+    except (zoneinfo.ZoneInfoNotFoundError, ValueError):
+        return None
+
+
+def labeled_time(t, viewer_tz, tz="", code=""):
+    """'5:03 PM MST' in the viewer's zone, plus '(4:03 PM PST at LAX)' when the airport's zone shows a different time."""
+    def fmt(z):
+        lt = t.astimezone(z)
+        return lt.strftime("%I:%M %p").lstrip("0") + " " + (lt.tzname() or "UTC")
+    vz, az = _zone(viewer_tz), _zone(tz)
+    s = fmt(vz or az or timezone.utc)
+    if vz and az and fmt(vz) != fmt(az):
+        s += f" ({fmt(az)}" + (f" at {code}" if code else "") + ")"
+    return s
+
+
+def local_time(t, tz, home=""):
+    """'7:27 PM' in the destination's time zone; with the zone's name when it differs from home."""
+    z, hz = _zone(tz), _zone(home)
+    lt = t.astimezone(z or timezone.utc)
+    s = lt.strftime("%I:%M %p").lstrip("0")
+    if not (z and hz and z.utcoffset(t) == hz.utcoffset(t)):
+        s += " " + (lt.tzname() or "UTC")
+    return s
+
+
+def landing_note(info, home=""):
+    """' Now landing 7:27 PM.' from the flight's current estimate, or ''."""
+    t = _parse(info.get("estimated_in")) or _parse(info.get("estimated_on")) or _parse(info.get("scheduled_in"))
+    if not t:
+        return ""
+    return f" Now landing {labeled_time(t, HOME_TZ, info.get('dest_tz') or '', info.get('dest') or '')}."
+
+
+HOME_TZ = ""
 
 
 # ---------- following a flight ----------
@@ -345,6 +596,8 @@ def phase(f, when=None):
     """added / scheduled / taxiing / airborne / landed / cancelled / diverted, from what we know."""
     when = when or now()
     info, pos = f["info"], f["pos"]
+    if not own_position(f, pos, when):
+        pos = {}
     if info.get("cancelled"):
         return "cancelled"
     if info.get("diverted"):
@@ -403,15 +656,18 @@ def check(store, f, key=None, get=_get_json, when=None, faa_cache=None):
                     f["info"] = got
                     f["origin"] = got.get("origin") or f["origin"]
                     f["dest"] = got.get("dest") or f["dest"]
-                    if got.get("atc_ident") and not f["callsign"]:
-                        f["callsign"] = got["atc_ident"]
+                    if got.get("dest"):
+                        f["told"].pop("dest_guess", None)  # FlightAware knows where it's going
             except Exception as exc:
                 errors.append(f"FlightAware: {type(exc).__name__}")
                 f["aero_at"] = _iso(when)
+    inbound = None
     try:
         pos = adsb(f, get, when)
-        if pos:
+        if pos and own_position(f, pos, when):
             f["pos"] = pos
+        elif pos:
+            inbound = pos  # the tail number's current flight, not hers yet
     except Exception as exc:
         errors.append(f"adsb.lol: {type(exc).__name__}")
     faa_now = {}
@@ -424,6 +680,9 @@ def check(store, f, key=None, get=_get_json, when=None, faa_cache=None):
             pass
     f["info"]["faa"] = faa_now
     f["info"]["errors"] = errors
+    f["info"].pop("inbound", None)
+    if inbound:
+        f["info"]["inbound"] = inbound
     old = f["status"]
     f["status"] = phase(f, when)
     if f["status"] == "airborne":
@@ -436,7 +695,8 @@ def check(store, f, key=None, get=_get_json, when=None, faa_cache=None):
         if step > f["told"].get("delay", 0):
             f["told"]["delay"] = step
             _tell("flight", {"person_uid": f["person_uid"], "uid": f["uid"], "title": f"{who}'s flight {what} is running late",
-                             "body": f"About {late} min late into {_where(f['dest'])}." if f["dest"] else f"About {late} min late."})
+                             "body": (f"About {late} min late into {_where(f['dest'])}." if f["dest"] else f"About {late} min late.")
+                             + landing_note(f["info"])})
     if f["status"] != old and f["status"] in ("landed", "cancelled", "diverted") and not f["told"].get(f["status"]):
         f["told"][f["status"]] = _iso(when)
         title = {"landed": f"{who} landed" + (f" in {_where(f['dest'])}" if f["dest"] else ""),
@@ -471,8 +731,8 @@ def view(f, when=None):
     seen = _parse(pos.get("seen_at")) if pos else None
     o, d = airport(f["origin"]), airport(f["dest"])
     out = {"uid": f["uid"], "person_uid": f["person_uid"], "person_name": f["person_name"], "ident": f["ident"],
-           "callsign": info.get("atc_ident") or f["callsign"], "airline": f["airline"], "status": f["status"],
-           "origin": f["origin"], "dest": f["dest"], "origin_name": o["name"] if o else "", "dest_name": d["name"] if d else "",
+           "callsign": f["callsign"], "airline": f["airline"], "status": f["status"],
+           "origin": f["origin"], "dest": f["dest"], "dest_guess": bool(f["dest"] and f["told"].get("dest_guess")), "origin_name": o["name"] if o else "", "dest_name": d["name"] if d else "",
            "origin_city": o["city"] if o else "", "dest_city": d["city"] if d else "", "started_at": f["started_at"],
            "updated_at": f["updated_at"], "late_min": arrival_delay(info), "faa": info.get("faa") or {},
            "times": {k: info.get(k) for k in ("scheduled_out", "estimated_out", "actual_out", "scheduled_in", "estimated_in",
@@ -480,15 +740,24 @@ def view(f, when=None):
            "gates": {k: info.get(k) for k in ("terminal_origin", "gate_origin", "terminal_destination", "gate_destination",
                                               "baggage_claim") if info.get(k)},
            "fa_status": info.get("status") or "", "aircraft": info.get("aircraft_type") or "", "has_fa": bool(f["aero_at"] and info.get("origin")),
-           "pos": None}
+           "origin_tz": info.get("origin_tz") or "", "dest_tz": info.get("dest_tz") or "", "pos": None, "inbound": None}
+    ib = info.get("inbound")
+    ib_seen = _parse(ib.get("seen_at")) if ib else None
+    if ib and o and ib_seen and when - ib_seen < timedelta(minutes=10) and not (info.get("actual_out") or info.get("actual_off")):
+        left = km(ib["lat"], ib["lon"], o["lat"], o["lon"])
+        at = bool(ib.get("ground")) and left < 10
+        gs = ib.get("gs_kt") or 0
+        out["inbound"] = {"at_origin": at, "eta_min": None if at or gs < 50 or ib.get("ground") else round(left / (gs * 1.852) * 60),
+                          "km": round(left)}
     if pos:
         out["pos"] = pos | {"age_min": _mins(when, seen)}
         if d and not pos.get("ground"):
             left = km(pos["lat"], pos["lon"], d["lat"], d["lon"])
             out["pos"]["km_to_go"] = round(left)
     cs = out["callsign"] or f["ident"]
+    fr = (cs if f["told"].get("confirmed") else f["ident"]).lower()  # a picked callsign, else the ticket number
     out["links"] = {"FlightAware": f"https://www.flightaware.com/live/flight/{urllib.parse.quote(cs)}",
-                    "Flightradar24": f"https://www.flightradar24.com/data/flights/{urllib.parse.quote(f['ident'].lower())}"}
+                    "Flightradar24": f"https://www.flightradar24.com/data/flights/{urllib.parse.quote(fr)}"}
     return out
 
 

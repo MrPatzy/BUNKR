@@ -24,7 +24,8 @@ class LayoutTests(unittest.TestCase):
         lay = homelayout.complete({"order": saved, "hidden": [], "collapsed": []})
         self.assertEqual(sorted(lay["order"]), sorted(homelayout.TILE_IDS))
         self.assertEqual([t for t in lay["order"] if t != "news"], saved)  # their order is kept
-        self.assertEqual(lay["order"].index("news"), lay["order"].index("alerts") + 1)  # news lands right after alerts, as built in
+        before = homelayout.TILE_IDS[homelayout.TILE_IDS.index("news") - 1]
+        self.assertEqual(lay["order"].index("news"), lay["order"].index(before) + 1)  # news lands after its built-in neighbour
 
 
 class HomeHttpTests(unittest.TestCase):
